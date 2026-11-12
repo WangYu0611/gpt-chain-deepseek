@@ -1,0 +1,89 @@
+name: GPT DSH serial document smoke
+on:
+  issues:
+    types: [opened]
+permissions: {}
+concurrency:
+  group: serial-dsh-${{ github.event.issue.number }}
+  cancel-in-progress: false
+jobs:
+  generate:
+    if: >-
+      github.repository == 'WangYu0611/chatgpt-deepseek-harness-test-20261028' &&
+      (github.event.issue.title == 'TASK_M0_1' || github.event.issue.title == 'TASK_M0_2') &&
+      github.event.sender.login == 'WangYu0611' &&
+      github.event.issue.user.login == 'WangYu0611' &&
+      github.event.issue.state == 'open'
+    runs-on: [dsh-cycle-20261028]
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      artifact-id: ${{ steps.evidence.outputs.artifact-id }}
+    steps:
+      # No checkout, shell interpolation of Issue text or execution of PR files.
+      - name: Run preinstalled trusted bounded controller
+        id: controller
+        shell: python {0}
+        env:
+          GH_SERIAL_TOKEN: ${{ github.token }}
+          SERIAL_ISSUE: ${{ github.event.issue.number }}
+        run: |
+          import os
+          from pathlib import Path
+          import re
+          import sys
+          home_value = os.environ.get('HARNESS_SMOKE_HOME', '')
+          python_value = os.environ.get('HARNESS_SMOKE_PYTHON', '')
+          issue = os.environ.get('SERIAL_ISSUE', '')
+          if not home_value or not python_value:
+              raise SystemExit('Trusted controller paths are not configured.')
+          home = Path(home_value)
+          expected_python = Path(python_value)
+          if not home.is_absolute() or not home.is_dir() or not expected_python.is_file():
+              raise SystemExit('Trusted controller paths are invalid.')
+          if Path(sys.executable).resolve() != expected_python.resolve():
+              raise SystemExit('Runner PATH must select the configured trusted Python.')
+          if not re.fullmatch(r'[1-9][0-9]*', issue):
+              raise SystemExit('Invalid Issue number.')
+          os.chdir(home)
+          sys.path.insert(0, str(home))
+          from lab_harness.serial_smoke import main
+          raise SystemExit(main(['generate', '--event', os.environ['GITHUB_EVENT_PATH']]))
+      - name: Upload only sanitized evidence
+        id: evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: serial-dsh-${{ github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.controller.outputs.artifact_path }}
+          include-hidden-files: true # Exact result.json only; its parent .runtime is hidden.
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    needs: generate
+    if: needs.generate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Checkout trusted workflow revision only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Download this run's exact artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.generate.outputs.artifact-id }}
+          path: serial-artifact
+          merge-multiple: true
+      - name: Independently test and publish task PR
+        env:
+          GH_SERIAL_TOKEN: ${{ github.token }}
+          SERIAL_ISSUE: ${{ github.event.issue.number }}
+        run: python3 -m lab_harness.serial_smoke publish --artifact serial-artifact/result.json

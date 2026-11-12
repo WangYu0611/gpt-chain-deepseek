@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "status": "prioritized_requirements_not_generation_authorization",
+  "observed_date": "2026-11-06",
+  "style_authority": "Each batch must pin the confirmed reference files and hashes; do not replace the approved direction from old prose.",
+  "paid_budget": {
+    "authorized_batch_id": "HOUSE-COMMON-001",
+    "total_cap_credits": 3000,
+    "additional_batch_budget_authorized": false,
+    "remaining_budget_source": "Current private Tripo ledger, including actual, reserved and unknown submissions",
+    "shared_asset_policy": "Reuse accepted versioned props and materials without regenerating or charging again"
+  },
+  "sources": [
+    "C:/codex-dsh-work/zhuguo-city/workspace/Docs/Features/M3HousingGrowthRules.md",
+    "C:/codex-dsh-work/zhuguo-city/workspace/Docs/Features/M2ContentCatalog.md",
+    "C:/codex-dsh-work/zhuguo-city/workspace/Docs/Features/FirstReleaseMatrix.md",
+    "C:/codex-dsh-work/zhuguo-city/workspace/Content/Data/ZgDefinitions/resources.json",
+    "C:/codex-dsh-work/zhuguo-city/workspace/Source/ZhuGuoCity/ZgCityView.cpp"
+  ],
+  "dispatch_rule": "Re-read the current accepted game definitions and freeze their SHA before creating each batch; this plan cannot dispatch paid API calls.",
+  "batches": [
+    {
+      "priority": 0,
+      "batch_id": "HOUSE-COMMON-001",
+      "scope": "Current ordinary housing sample",
+      "levels": ["L1", "L4", "L8"],
+      "shared_props": "Reuse the six life-prop families already present in the approved production manifest",
+      "status": "existing_authorized_preview_scope",
+      "cost_policy": "Existing 3000-credit batch cap; reuse completed candidates, increment only a reworked asset revision",
+      "acceptance": "Batch visual decision bound to the exact package; approval automatically enqueues asset-library integration"
+    },
+    {
+      "priority": 1,
+      "batch_id": "HOUSE-COMMON-REMAINING",
+      "scope": "Complete the ordinary eight-level visual progression",
+      "levels": ["L2", "L3", "L5", "L6", "L7"],
+      "paid_generation_enabled": false,
+      "dependency": "Current sample accepted and remaining-level scope explicitly released; costs remain within HOUSE-COMMON-001 cap unless later separately authorized",
+      "reuse": "Approved human scale, 16m courtyard conventions, material standards and shared life props",
+      "quality_focus": "Distinct massing, courtyard organization, materials and workmanship at every level"
+    },
+    {
+      "priority": 2,
+      "batch_id": "CITY-MARKET-STORAGE",
+      "scope": "High-frequency city logistics and commerce silhouettes",
+      "definition_ids": [
+        "building.debug.storehouse", "building.debug.market", "building.debug.bean_market",
+        "building.debug.pottery_market", "building.debug.cloth_market", "building.debug.wine_market"
+      ],
+      "paid_generation_enabled": false,
+      "dependency": "Separate scope and funding; reusable stall, basket, jar and storage modules should precede paid full-building variants",
+      "quality_focus": "Visible entrances, loading space and storage contents; preserve current simulation dimensions"
+    },
+    {
+      "priority": 3,
+      "batch_id": "CITY-LIFE-SERVICES",
+      "scope": "M3 public and cultural service landmarks",
+      "definition_ids": [
+        "building.debug.visit_station", "building.debug.well", "building.debug.clinic",
+        "building.debug.watch_post", "building.debug.academy", "building.debug.stage",
+        "building.debug.altar", "building.debug.fire_tower", "building.debug.garden"
+      ],
+      "paid_generation_enabled": false,
+      "dependency": "Separate scope and funding; use current service definitions without inventing additional gameplay",
+      "quality_focus": "Readable service identity at normal game distance; believable activity and shared scale"
+    },
+    {
+      "priority": 4,
+      "batch_id": "CITY-PRODUCTION-AGRICULTURE",
+      "scope": "Existing production chains and agricultural modules",
+      "definition_ids": [
+        "building.debug.workshop", "building.debug.logging_camp", "building.debug.iron_mine",
+        "building.debug.iron_smelter", "building.debug.kiln", "building.debug.loom",
+        "building.debug.winery", "building.debug.millet_field", "building.debug.bean_field"
+      ],
+      "paid_generation_enabled": false,
+      "dependency": "Separate scope and funding; procedural crop, tool, material-pile and modular building assets first",
+      "quality_focus": "Human, animal and water-powered production; visible materials and work without changing simulation rules"
+    },
+    {
+      "priority": 5,
+      "batch_id": "HOUSE-ELITE",
+      "scope": "Five-level elite housing line",
+      "levels": ["E1", "E2", "E3", "E4", "E5"],
+      "paid_generation_enabled": false,
+      "dependency": "Elite definitions and scope frozen, separate funding authorized, ordinary housing visual grammar accepted"
+    }
+  ],
+  "integration_constraints": {
+    "unapproved_assets_in_game": false,
+    "approved_asset_library": "Only current accepted versioned UE packages and an approved catalog; no preview map or prior unapproved versions",
+    "gameplay_adapter": "Separate bounded engineering task; asset-library inclusion alone does not change game rendering",
+    "current_ordinary_footprint": "building.debug.hut is 1x1 at 4m/cell; the 16m art courtyard is not yet the gameplay footprint",
+    "save_compatibility": "Never silently enlarge occupied legacy plots or shrink the approved courtyard to fit them",
+    "functional_worker": "Never copy into or modify the active unattended game workspace"
+  }
+}

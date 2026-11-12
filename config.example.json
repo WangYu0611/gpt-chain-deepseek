@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "runtime_dir": ".relay",
+  "repository": {
+    "url": "https://github.com/OWNER/REPO.git",
+    "branch": "main",
+    "workdir": "",
+    "git_executable": "git"
+  },
+  "browser": {
+    "conversation_url": "",
+    "channel": "chrome",
+    "profile_dir": ".relay/browser-profile",
+    "cdp_url": "",
+    "headless": false,
+    "timeout_seconds": 3600,
+    "stable_seconds": 5,
+    "selectors": {}
+  },
+  "dsh": {
+    "executable": "dsh",
+    "args": ["--profile", "headless", "--json"],
+    "home": "",
+    "patch": "dsh-account.patch.yml",
+    "timeout_seconds": 14400,
+    "reuse_session": true,
+    "env": {}
+  },
+  "evidence": {
+    "upload_attachments": false,
+    "require_reports": true,
+    "require_screenshots": false,
+    "allow_last_commit_only": false,
+    "max_files": 20,
+    "max_total_mb": 40
+  },
+  "limits": {
+    "max_cycles": 10,
+    "max_revisions": 3
+  }
+}

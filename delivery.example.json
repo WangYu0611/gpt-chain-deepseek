@@ -1,0 +1,7 @@
+{
+  "task_id": "TASK-001",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "commit_sha": "1111111111111111111111111111111111111111",
+  "report_paths": ["Docs/Reports/TASK-001.md"],
+  "screenshot_paths": ["Docs/Reports/Evidence/TASK-001/screenshot.png"]
+}

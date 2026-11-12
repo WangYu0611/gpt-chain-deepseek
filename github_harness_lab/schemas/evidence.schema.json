@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/github-harness-lab/evidence.schema.json",
+  "title": "GitHub Harness Evidence Manifest",
+  "description": "结构验证不等于可信来源认证；offline-demo 永远不能证明真实集成。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "mode", "issue", "pr", "base_commit_sha", "result_commit_sha", "harness", "started_at", "finished_at", "changed_files", "tests", "ci", "artifacts", "blocked_checks", "status"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "mode": {"enum": ["dry-run", "offline-demo", "live"]},
+    "issue": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository", "number", "task_id"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "number": {"type": "integer", "minimum": 1},
+        "task_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "pr": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "additionalProperties": false, "required": ["number", "url"], "properties": {"number": {"type": "integer", "minimum": 1}, "url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/"}}}
+      ]
+    },
+    "base_commit_sha": {"oneOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+    "result_commit_sha": {"oneOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+    "harness": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "model", "version", "exit_code", "final_kind"],
+      "properties": {
+        "session_id": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "version": {"type": ["string", "null"]},
+        "exit_code": {"type": ["integer", "null"]},
+        "final_kind": {"type": ["string", "null"]}
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "changed_files": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/relativePath"}},
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "command", "exit_code", "log", "timed_out"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "exit_code": {"type": ["integer", "null"]},
+          "log": {"$ref": "#/$defs/relativePath"},
+          "stderr_log": {"$ref": "#/$defs/relativePath"},
+          "timed_out": {"type": "boolean"},
+          "output_limit_exceeded": {"type": "boolean"}
+        }
+      }
+    },
+    "ci": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_url", "head_sha", "status"],
+      "properties": {
+        "run_url": {"type": ["string", "null"], "format": "uri"},
+        "head_sha": {"oneOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+        "status": {"enum": ["NOT_RUN", "PENDING", "PASS", "FAIL", "BLOCKED"]}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "path", "sha256"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "path": {"$ref": "#/$defs/relativePath"},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "blocked_checks": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "status": {"enum": ["REVIEW", "FAILED", "BLOCKED"]},
+    "visual": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scenario", "baseline", "actual", "diff", "gpu", "driver", "metrics", "reproducible_parameters"],
+      "properties": {
+        "scenario": {"type": "string"},
+        "baseline": {"type": ["string", "null"]},
+        "actual": {"type": ["string", "null"]},
+        "diff": {"type": ["string", "null"]},
+        "gpu": {"type": ["string", "null"]},
+        "driver": {"type": ["string", "null"]},
+        "metrics": {"type": "object"},
+        "reproducible_parameters": {"type": "object"}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "relativePath": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "REVIEW"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "base_commit_sha": {"$ref": "#/$defs/sha"},
+          "result_commit_sha": {"$ref": "#/$defs/sha"},
+          "harness": {"properties": {"session_id": {"type": "string", "minLength": 1}, "exit_code": {"const": 0}, "final_kind": {"const": "completed"}}},
+          "tests": {"minItems": 1, "items": {"properties": {"exit_code": {"const": 0}, "timed_out": {"const": false}, "output_limit_exceeded": {"const": false}}}}
+        }
+      }
+    }
+  ]
+}

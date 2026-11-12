@@ -1,0 +1,65 @@
+GitHub × 官方 DeepSeek Harness：当前使用入口
+
+【2026-10-29 18:52 更新】旧控制 Issue #7 与旧任务链已停止；当前控制 Issue #17、PR #23（检查 PASS，未合并，等待人工审阅）。旧文档保留为历史记录；当前状态以 C:\harness-zhuguo-controller\当前使用入口.txt 和 deployment-status.json 为准。
+
+诸国城建持续开发已部署到 WangYu0611/zhuguo-city，部署 PR #6 已合入。
+控制 Issue #7 为本仓库的持续运行授权；没有预设总时长或总任务数上限。
+本地 Runner 已核对为 RUNNING_OWNED。当前无需重复启动。
+持续运行已恢复，第三项任务正在执行；Runner 与两个网页任务保持运行。
+
+查看正在进行的任务、报告与验收：
+当前第三项 Issue #13：https://github.com/WangYu0611/zhuguo-city/issues/13
+最新 PR #12（网页验收 FAIL/BLOCKED）：https://github.com/WangYu0611/zhuguo-city/pull/12
+网页确认规则纠正：https://github.com/WangYu0611/zhuguo-city/pull/12#issuecomment-6475850462
+此前人工规则纠正说明：https://github.com/WangYu0611/zhuguo-city/pull/12#issuecomment-6475779870
+启动/监测网页对话：https://chatgpt.com/c/6ae22173-c84c-83ec-8d67-bd003d61e683
+独立 PR 验收网页对话：https://chatgpt.com/c/6ae21ee7-0208-83ec-b81f-de734e558a7f
+仓库 PR：https://github.com/WangYu0611/zhuguo-city/pulls
+控制与撤销：https://github.com/WangYu0611/zhuguo-city/issues/7
+本机详细入口：C:\harness-zhuguo-controller\当前使用入口.txt
+
+已核对进度（2026-10-29；后续实时状态以以上链接为准）：
+Issue #9 → 官方 DSH 真实请求一次 → PR #10 已完成提交。
+PR #10 的控制器检查 PASS，但缺少要求的诊断报告，独立网页验收判 FAIL。
+网页 PR 事件自动发布 Issue #11，作为 number=2 的 REWORK 返工任务；第二轮现已完成真实 DSH 请求一次，生成与发布作业均 success。
+这次 PR #10 → Issue #11 交接没有人工转发或再次 Run now。
+第二轮已提交 PR #12，新增 Docs/Reports/TASK-M2-21A.md 诊断报告，无源码改动；累计真实模型请求 2 次。
+PR #12 HEAD：5a2092b60ab3bc1f01e38066b99161195b3d092f。
+PR #12 网页验收为 FAIL/BLOCKED：原报告缺失问题 R01 已关闭，但发现采样持续时长、日志含义、假设因果等新准确性问题。
+网页将停止条件误用为“返工一次后停止”；实际配置是“同一问题连续两次 FAIL 暂停”。
+已在 PR #12 留下一次人工规则纠正说明；网页随后承认并纠正误用，创建并读回第三项 Issue #13（number=3、REWORK）。
+该项只允许修改诊断报告，修正 R02/R03/R04；前一报告缺失问题 R01 保持关闭。Runner 已领取第三项 generate 作业，正在执行。
+人工纠正只通过 GitHub 评论发送，没有网页输入、权限改动或由人工直接创建第三项 Issue。
+两个真实 DSH 任务及对应 PR 已完成，首轮至返工的自动交接已验证；中途有初始格式修复和一次规则纠正，不能称为完全无人干预连续两轮验收通过。
+首次启动用过一次官方 Run now，并在换行格式修正后人工重投首项；这段启动修复不计入自然交接。
+首项：https://github.com/WangYu0611/zhuguo-city/issues/9
+首份 PR：https://github.com/WangYu0611/zhuguo-city/pull/10
+已完成返工 Issue：https://github.com/WangYu0611/zhuguo-city/issues/11
+
+本机操作（在当前桌面用户的 PowerShell 中运行）：
+查看状态：& 'C:\harness-zhuguo-controller\Status.ps1'
+停止 Runner：& 'C:\harness-zhuguo-controller\Stop-Runner.ps1'
+重启后启动：& 'C:\harness-zhuguo-controller\Start-Runner.ps1'
+完整停止还需关闭控制 Issue #7，并暂停上述两个网页任务；本地停止不能撤回已经交给云端的发布。
+启动脚本不会自动删除 STOP。恢复前先核对最后任务、收费请求和远端结果；具体步骤见控制器目录的使用说明.txt。
+
+电脑须保持开机、联网和当前用户会话；没有安装服务、计划任务或开机自启。
+持续运行不表示失败后无限重试：模型或环境异常、同问题连续两次失败时暂停核对。
+功能 PR 由用户审阅后手动合并；main/workflow 基线改变会暂停，目前不自动跟随合并更新基线。
+真实视觉验收仍为 NOT_RUN；构建或 NullRHI 逻辑检查通过不能代替真实画面、输入和 UI 闪动验收。
+同一仓库所有 Runner 共用同一持久控制器目录及 .runtime；升级保留状态，不能换新目录绕过已用请求记录。
+
+更换 GitHub 仓库：
+1. 双击 C:\Users\wy331\OneDrive\文档\ChatGPT\gpt_chain_deepseek\打开GitHub仓库设置.cmd。
+2. 填入仓库地址、默认分支、可信派工账号和已有本地项目路径。
+3. 点击“保存配置”；这一步仅保存本地配置，不改变当前部署，也不接通新仓库。
+4. 在“接入与使用”点击“保存并复制接入请求”，粘贴到当前 Codex 对话。
+   新仓库需核对代码范围与检查命令，准备审阅文件，再独立部署、授权、注册 Runner 并绑定两个新网页对话。
+   不继承诸国城建或测试仓库的 Issue 编号、arm、Runner 注册和历史授权；通用执行器本身不必按仓库重写。
+
+设置窗口的“生成通用部署包”目前仍导出旧 generic/ 文档演示模板：两项受限文档任务，第三项只发布。
+它不会自动安装这里已经部署的持续代码模式。导出文件位于 github_harness_lab/.runtime/setup/，不会上传或发送。
+持续代码模式使用独立审阅的 code-profile.json 与 harness-code 工作流；不能把旧文档模板当作代码部署包。
+配置位置：C:\Users\wy331\OneDrive\文档\ChatGPT\gpt_chain_deepseek\github_harness_lab\config.local.json
+不要在仓库设置输入框中填写密码或 API Key。
+docs/SERIAL_TWO_ROUND_RESULT.md 是旧测试仓库的历史文档演示结果，不代表当前诸国城建运行状态。

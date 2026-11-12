@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "repository": "OWNER/REPOSITORY",
+  "default_branch": "main",
+  "trusted_actors": ["trusted-planner"],
+  "source_repository": "C:/dsh-lab/trusted-source",
+  "runtime_dir": ".runtime",
+  "authorization_file": ".private/authorization.json",
+  "live_enabled": false,
+  "limits": {
+    "run_timeout_seconds": 3600,
+    "max_budget_usd": 5,
+    "max_reworks": 3,
+    "max_failures": 3
+  },
+  "test_commands": [
+    {
+      "id": "unit",
+      "argv": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+      "timeout_seconds": 600
+    }
+  ],
+  "dsh": {
+    "command": ["dsh"],
+    "home": "C:/dsh-lab/dsh-home",
+    "model": "REPLACE_WITH_VERIFIED_OFFICIAL_PROFILE_MODEL",
+    "verified_version": "REPLACE_WITH_PINNED_OFFICIAL_VERSION",
+    "timeout_seconds": 3000,
+    "max_output_bytes": 16777216,
+    "budget_enforced_externally": false
+  }
+}

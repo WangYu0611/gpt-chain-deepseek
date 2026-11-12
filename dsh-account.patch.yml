@@ -1,0 +1,17 @@
+# Official DSH headless overlay: use the account already saved by Desktop.
+# This enables credential services; it contains no credentials and logs in nobody.
+# Configure dsh.home when Desktop uses a non-default Harness home.
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+- id: deepseek-account
+  disabled: false
+- id: agent-default-model
+  config:
+    provider: deepseek-account
+    model: deepseek-flash
+    reasoningEffort: max
+- id: llm-deepseek-account
+  config:
+    thinking: enabled

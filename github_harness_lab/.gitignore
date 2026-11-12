@@ -1,0 +1,11 @@
+.runtime/
+.private/
+.venv/
+config.local.json
+__pycache__/
+*.py[cod]
+*.log
+*.sqlite3*
+.env*
+*.key
+*.pem

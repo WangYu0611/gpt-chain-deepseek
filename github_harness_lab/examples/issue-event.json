@@ -1,0 +1,25 @@
+{
+  "action": "labeled",
+  "label": {
+    "name": "agent:ready"
+  },
+  "repository": {
+    "full_name": "OWNER/REPOSITORY"
+  },
+  "sender": {
+    "login": "trusted-planner"
+  },
+  "issue": {
+    "number": 1,
+    "state": "open",
+    "user": {
+      "login": "trusted-planner"
+    },
+    "labels": [
+      {
+        "name": "agent:ready"
+      }
+    ],
+    "body": "Offline demo task\n\n```agent-task\n{\n  \"task_id\": \"LAB-001\",\n  \"depends_on\": [],\n  \"allowed_paths\": [\n    \"src\"\n  ],\n  \"forbidden_paths\": [\n    \"secrets\"\n  ],\n  \"requirements\": [\n    \"Implement add(a, b) correctly\"\n  ],\n  \"acceptance\": [\n    {\n      \"id\": \"AC-1\",\n      \"criterion\": \"add(2,3) returns 5\"\n    }\n  ],\n  \"evidence\": [\n    {\n      \"id\": \"EV-1\",\n      \"requirement\": \"Actual unittest exit code zero at result commit\"\n    }\n  ],\n  \"test_ids\": [\n    \"unit\"\n  ],\n  \"risk\": \"Offline fixture only\",\n  \"rollback\": \"Discard the dedicated local clone\"\n}\n```"
+  }
+}

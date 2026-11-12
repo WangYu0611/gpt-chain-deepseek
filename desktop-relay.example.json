@@ -1,0 +1,67 @@
+{
+  "repository": {
+    "url": "https://github.com/OWNER/REPOSITORY",
+    "branch": "main"
+  },
+  "runtime_dir": ".window-relay",
+  "gpt": {
+    "url": "https://chatgpt.com/c/CONVERSATION-ID",
+    "dedicated_input": false,
+    "window": {
+      "process_name": "chrome.exe",
+      "title_contains": "YOUR GPT CONVERSATION TITLE"
+    },
+    "calibration": {},
+    "uia": {
+      "write_mode": "wm_char",
+      "verification_timeout": 5,
+      "editor": {
+        "control_type": "Edit",
+        "class_token": "ProseMirror"
+      }
+    }
+  },
+  "dsh": {
+    "project": "ue_game",
+    "project_path": "C:/Projects/ue_game",
+    "executable": "C:/Path/DeepSeek Harness.exe",
+    "window": {
+      "process_name": "DeepSeek Harness.exe",
+      "title_contains": "DeepSeek Harness"
+    },
+    "calibration": {},
+    "uia": {
+      "write_mode": "wm_char",
+      "verification_timeout": 5,
+      "project_mode": "sidebar_group",
+      "sidebar_group": {
+        "project_class_suffix": "_projectRow",
+        "session_class_suffix": "_sessionRow",
+        "selected_class_suffix": "_selected"
+      },
+      "new_card": {
+        "name": "新会话",
+        "control_type": "TreeItem",
+        "class_suffix": "_sessionRow"
+      },
+      "editor": {
+        "control_type": "Edit",
+        "class_name": "GRgSLq_input"
+      },
+      "access_mode": "完全权限"
+    }
+  },
+  "messages": {
+    "gpt": "DS做完了，请检查。",
+    "dsh": "拉取最新的main，并完成指定任务书。"
+  },
+  "auto": {
+    "poll_seconds": 3,
+    "start_with": "gpt",
+    "stable_samples": 3,
+    "settle_seconds": 5,
+    "phase_timeout_seconds": 21600,
+    "unavailable_timeout_seconds": 60
+  },
+  "sender_mode": "uia"
+}

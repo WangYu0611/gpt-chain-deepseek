@@ -1,0 +1,9 @@
+{
+  "repository": "OWNER/REPOSITORY",
+  "expires_at": "2000-01-01T00:00:00Z",
+  "scopes": [],
+  "isolated_environment_verified": false,
+  "provider_hard_budget_confirmed": false,
+  "budget_limit_usd": 0,
+  "note": "This is deliberately invalid. No authorization was granted in this build."
+}

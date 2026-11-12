@@ -1,0 +1,8 @@
+{"type":"session","sessionId":"session-recorded-fixture","cwd":"C:\\fixture\\workspace"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+[llm-deepseek-account] model listing from https://api.deepseek.com/models loaded 2 model(s), skipped 0 row(s)
+{"type":"text","text":"def add(left, right):\n    return left + right\n\ndef multiply(left, right):\n    return left * right"}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":117,"outputTokens":23,"cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":140}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}
+{"type":"final","text":"def add(left, right):\n    return left + right\n\ndef multiply(left, right):\n    return left * right"}

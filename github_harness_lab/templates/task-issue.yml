@@ -1,0 +1,50 @@
+name: Agent Task
+description: 带范围、功能条件和独立证据条件的受控任务书
+title: "[AGENT] <Task ID> <目标>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本模板不自动添加 agent:ready。可信发布者完成校验、取得上线授权后再加标签。
+        Worker 仅执行可信配置中的 test_ids；不得通过 Issue 下发外层任意 shell 命令。
+        路径是仓库相对前缀目录或精确文件，不支持 glob，不接受绝对路径、.. 或符号链接。
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景与目标
+      description: 说明问题、用户可观察行为和不在本任务内的内容。
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: 机器可读任务书
+      description: 保留 agent-task 围栏；替换示例内容并保持合法 JSON。功能与证据条件分别列出。
+      value: |
+        ```agent-task
+        {
+          "task_id": "DEMO-P2-001",
+          "depends_on": [],
+          "allowed_paths": ["src/", "tests/"],
+          "forbidden_paths": [".github/", "secrets/", "config/"],
+          "requirements": ["实现最小功能并保持现有接口兼容"],
+          "acceptance": [{"id": "F1", "criterion": "输入已知示例时返回期望结果；无效输入可预测地失败"}],
+          "evidence": [{"id": "E1", "requirement": "可信外层测试命令退出码为 0，日志与 result commit SHA 一致"}],
+          "test_ids": ["unit"],
+          "risk": "说明影响范围与失败风险",
+          "rollback": "关闭关联 PR 或经人工审批 revert 结果提交，不改写主分支历史"
+        }
+        ```
+    validations:
+      required: true
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: 发布检查
+      options:
+        - label: 已检查同一 Task ID、依赖和活跃任务，未重复派工
+          required: true
+        - label: 路径范围符合可信配置，未要求修改安全策略、工作流或凭据
+          required: true
+        - label: 功能完成条件与证据充分性条件已分别填写
+          required: true

@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "project_path": "C:/Projects/REPLACE_WITH_PROJECT",
+  "goal": "填写项目具体开发目标、边界及完成条件。建议使用 init --goal-file 从真实需求生成配置。",
+  "runtime_dir": ".unattended/example-project",
+  "branch": "unattended/example-project",
+  "base_ref": "HEAD",
+  "task_prefix": "TASK-AUTO",
+  "schedule": {
+    "timezone": "Asia/Shanghai",
+    "weekday_start": "18:00",
+    "weekday_end": "08:00",
+    "weekends_all_day": true,
+    "holidays_file": "unattended/calendars/china-2026.json"
+  },
+  "close_policy": "strict",
+  "poll_seconds": 30,
+  "step_timeout_seconds": 3600,
+  "max_reworks": 3,
+  "max_failures": 3,
+  "push": false,
+  "remote": "origin",
+  "publication": {
+    "mode": "milestone",
+    "milestone_id": "M2",
+    "goal": "示例目标，请按实际项目替换：按项目 Roadmap 完成 M2 基础城市闭环全部范围，补齐物流、食物质量和完整饥饿后果，关闭仍开放的审查，并以阶段独立测试和真实运行证据验收；不进入 M3。此文字描述待完成目标，不代表已实现。"
+  },
+  "checks": [
+    {
+      "id": "unit",
+      "argv": ["C:/Python312/python.exe", "-m", "unittest", "discover", "-s", "tests"],
+      "timeout_seconds": 600
+    }
+  ],
+  "codex": {
+    "command": ["codex.exe"],
+    "model": "gpt-6-astra",
+    "reasoning_effort": "high",
+    "sandbox": "read-only"
+  },
+  "dsh": {
+    "desktop_install": "C:/Users/YOUR_USER/AppData/Local/Programs/DeepSeek Harness",
+    "home": "C:/Users/YOUR_USER/.dsh",
+    "patches": ["dsh-account.patch.yml"],
+    "verified_version": "0.2.1-rc.3",
+    "model": "deepseek-flash",
+    "reasoning_effort": "max",
+    "permission_mode": "workspace-write"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "schema": "harness-project/v1",
+  "repository": "WangYu0611/zhuguo-city",
+  "default_branch": "main",
+  "trusted_actor": "WangYu0611",
+  "source_repository": "C:\\Users\\wy331\\OneDrive\\文档\\ue_game",
+  "capability": "bounded-document",
+  "live_enabled": false,
+  "runner_label": "harness-fef650bdf078",
+  "document_tasks": [
+    {
+      "number": 1,
+      "task_id": "TASK-HARNESS-FEF650BDF078-01",
+      "document_path": "Docs/Harness/TASK-HARNESS-FEF650BDF078-01.md",
+      "report_path": "Docs/Reports/TASK-HARNESS-FEF650BDF078-01.md",
+      "prompt": "写一份中文接入说明，说明本次仅验证 GPT、GitHub 与官方 DSH 的文档交接，不声明项目开发完成。第一行必须为 'TASK-HARNESS-FEF650BDF078-01' 对应的 Markdown 标题：# TASK-HARNESS-FEF650BDF078-01。必须包含以下小节：## 验证范围、## 完成条件。正文 80—1500 字。只输出 Markdown，不含代码围栏、HTML、链接或其他任务内容。",
+      "validation": {
+        "first_line": "# TASK-HARNESS-FEF650BDF078-01",
+        "required_headings": [
+          "## 验证范围",
+          "## 完成条件"
+        ],
+        "min_chars": 80,
+        "max_chars": 1500,
+        "bullet_count": null
+      }
+    },
+    {
+      "number": 2,
+      "task_id": "TASK-HARNESS-FEF650BDF078-02",
+      "document_path": "Docs/Harness/TASK-HARNESS-FEF650BDF078-02.md",
+      "report_path": "Docs/Reports/TASK-HARNESS-FEF650BDF078-02.md",
+      "prompt": "写一份中文检查清单，恰好三条以“- ”开头，分别检查首份报告、第二份执行证据和第三项只发布不执行。第一行必须为 'TASK-HARNESS-FEF650BDF078-02' 对应的 Markdown 标题：# TASK-HARNESS-FEF650BDF078-02。必须包含以下小节：## 三项检查。正文 80—1500 字。只输出 Markdown，不含代码围栏、HTML、链接或其他任务内容。",
+      "validation": {
+        "first_line": "# TASK-HARNESS-FEF650BDF078-02",
+        "required_headings": [
+          "## 三项检查"
+        ],
+        "min_chars": 80,
+        "max_chars": 1500,
+        "bullet_count": 3
+      }
+    }
+  ],
+  "stop_task": {
+    "number": 3,
+    "task_id": "TASK-HARNESS-FEF650BDF078-03",
+    "dispatch": false
+  }
+}
