@@ -13,7 +13,7 @@ import stat
 from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
-from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, load_config
+from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, codex_coding_settings, load_config
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
 TAIL_BYTES = 128 * 1024
@@ -28,7 +28,7 @@ SESSION_HEADER_BYTES = 8 * 1024
 CLAUDE_SESSION_HEADER_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
 _CLAUDE_SESSION_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-_CODING_NAMES = {"dsh": "DSH", "claude": "Claude Code"}
+_CODING_NAMES = {"dsh": "DSH", "claude": "Claude Code", "codex": "Codex"}
 _CLAUDE_TOOLS = {
     "Read": "读取文件", "Edit": "修改文件", "MultiEdit": "修改文件", "Write": "写入文件",
     "NotebookEdit": "修改笔记本", "Bash": "执行命令", "PowerShell": "执行命令",
@@ -308,6 +308,11 @@ def _codex_route(runtime, directory, kind):
         finished = api.get("status") in ("completed", "failed") and type(api.get("exit_code")) is int
         mode = "responses_api" if kind == "review" and api.get("kind") == kind and (running or finished) else None
         return mode, directory
+    if kind == "code":
+        native = (api.get("kind") == "code" and api.get("coding_provider") == "codex" and
+                  api.get("coding_protocol") == "codex_exec_v1" and api.get("coding_sandbox") == "workspace-write" and
+                  api.get("codex_auth_mode") == "chatgpt" and type(api.get("exit_code")) is int)
+        return ("chatgpt" if native else None), directory
     if api.get("kind") != kind or api.get("codex_auth_mode") != "api_key" or type(api.get("exit_code")) is not int:
         return None, directory
     try:
@@ -549,7 +554,9 @@ def _task_session(runtime, task, operation, phase, coding_provider):
         if isinstance(event, dict):
             if claude and event.get("type") == "system" and event.get("subtype") == "init":
                 identity = event.get("session_id")
-            elif not claude and event.get("type") == "session":
+            elif coding_provider == "codex" and event.get("type") == "thread.started":
+                identity = event.get("thread_id")
+            elif coding_provider == "dsh" and event.get("type") == "session":
                 identity = event.get("sessionId")
         return (identity if isinstance(identity, str) and identity_pattern.fullmatch(identity) else None), owner
     return None, owner
@@ -631,6 +638,57 @@ def _planning_source(runtime, value):
         return _clean(directory.name, 120), record
     except (OSError, ValueError, TypeError, RecursionError):
         return None, {}
+
+
+def _coding_settings(config):
+    provider = config.get("coding_provider", "dsh")
+    if provider == "claude":
+        return claude_coding_settings(config)
+    settings = dict(config.get(provider, {}))
+    if provider == "codex":
+        settings["model"], settings["reasoning_effort"] = codex_coding_settings(config)
+    return settings
+
+
+def _codex_code_model(runtime, task, operation, directory, session):
+    """Distinguish native model metadata from the recorded invocation selection."""
+    try:
+        if (directory is None or operation.get("kind") != "code" or operation.get("coding_provider") != "codex" or
+                operation.get("task_id") != task.get("id") or not isinstance(session, str) or not _SESSION_ID.fullmatch(session)):
+            return None, None, "unknown"
+        logical = _operation_directory(runtime, operation)
+        head = operation.get("head_sha")
+        if (logical is None or logical != _confined(runtime, directory) or logical.parent != runtime / "runs" or
+                not re.fullmatch(r"code-[a-f0-9]{32}", logical.name) or
+                not isinstance(head, str) or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", head) or
+                head not in {task.get("base_sha"), task.get("code_base"), (task.get("candidate") or {}).get("head_sha")}):
+            return None, None, "unknown"
+        with _confined(runtime, logical / "stdout.log").open("rb") as stream:
+            header = stream.read(SESSION_HEADER_BYTES)
+        first = next((line for line in header.split(b"\n")[:-1] if line.strip()), None)
+        event = json.loads(first.decode("utf-8-sig")) if first else {}
+        if event.get("type") != "thread.started" or event.get("thread_id") != session:
+            return None, None, "unknown"
+        receipt = _object(_confined(runtime, logical / "process.json"), missing={}, maximum=16384)
+        settings = operation
+        if receipt:
+            if (receipt.get("kind") != "code" or receipt.get("coding_provider") != "codex" or
+                    receipt.get("coding_protocol") != "codex_exec_v1" or receipt.get("coding_sandbox") != "workspace-write" or
+                    receipt.get("codex_auth_mode") != "chatgpt" or receipt.get("protocol") == "openai_responses_v1" or
+                    receipt.get("session_id") != session or receipt.get("requested_session") not in (None, session) or
+                    receipt.get("coding_model") != operation.get("coding_model") or
+                    receipt.get("coding_reasoning_effort") != operation.get("coding_reasoning_effort") or
+                    receipt.get("task_id", task.get("id")) != task.get("id") or receipt.get("head_sha", head) != head):
+                return None, None, "unknown"
+            settings = receipt
+        requested = _clean(settings.get("coding_model"), 120) or None
+        effort = _clean(settings.get("coding_reasoning_effort"), 40) or None
+        observed = event.get("model")
+        if isinstance(observed, str) and _SESSION_ID.fullmatch(observed):
+            return observed, effort if observed == requested else None, "recorded"
+        return requested, effort, "configured" if requested else "unknown"
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return None, None, "unknown"
 
 
 def _operation_model(runtime, operation, directory, session=None, *, allow_notifications=False):
@@ -877,7 +935,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
         ("routine_planner", "常规任务规划", "明确本轮任务范围、验收条件和核心测试，判断是否涉及关键系统。", config.get(planner, {})),
         ("critical_planner", "关键系统规划", "核对关键系统边界、兼容性和跨模块行为，形成最终任务书。", {"model": claude.get("critical_plan_model"), "reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort"))}),
         ("developer", "功能开发", "按任务书修改代码、运行提交前验证并提交本地变更。",
-         claude_coding_settings(config) if coder == "claude" else config.get(coder, {})),
+         _coding_settings(config)),
         ("checks", "构建与测试", "在固定提交上独立运行构建、核心测试及阶段检查。", {}),
         ("reviewer", "独立审核", "由 Codex 核对实际代码和证据，决定通过、返工或阻塞。", codex),
         ("publisher", "交付与发布", "登记通过的本地任务，阶段独立验收通过后按策略发布。", {}),
@@ -933,6 +991,10 @@ def _workflow(snapshot, config, state, operation, directory=None):
         model_owned = False
     recorded_model, recorded_effort = _operation_model(Path(config["runtime_dir"]), model_evidence, directory, session,
         allow_notifications=followup_bound) if model_owned else (None, None)
+    coding_source = None
+    if current == "code" and coder == "codex" and model_owned:
+        recorded_model, recorded_effort, coding_source = _codex_code_model(
+            Path(config["runtime_dir"]), task, operation, directory, session)
     maintenance = snapshot.get("maintenance") or {}
     if (current_state == "paused" and current == "code" and state.get("phase") == "CODE" and
             maintenance.get("status") == "waiting_boundary" and maintenance.get("current_call_active") is True and
@@ -965,7 +1027,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
         if identity == current and module_id not in {"checks", "publisher"} and owns_operation and (
                 operation.get("kind") == expected_kind or (phase == "PLAN" and selection.get("planning_model"))):
             model, effort = recorded_model, recorded_effort
-            model_source = "recorded" if model else "unknown"
+            model_source = coding_source if identity == "code" and coding_source else "recorded" if model else "unknown"
         elif identity == "critical_plan" and replans:
             latest = replans[-1]
             historical = {"kind": "plan", "planning_provider": "claude", "planning_model": latest.get("planning_model"),
@@ -1034,6 +1096,14 @@ def _workflow(snapshot, config, state, operation, directory=None):
                             "route": route, "route_reason": _clean(task.get("planning_reason") or (selection.get("critical_candidate") or {}).get("planning_reason"), 600),
                             "rework": {"active": rework_active, "count": max(0, reworks), "reason": _clean(task.get("feedback"), 600)}}
     snapshot["modules"] = modules
+    if coder == "codex":
+        developer = next(node for node in nodes if node["id"] == "code")
+        settings = role_map["developer"]
+        snapshot["models"]["codex_coding"] = {"name": "Codex",
+            "model": (developer["model"] if phase == "CODE" and developer["model"] else
+                      _clean(settings.get("model"), 120)) or "配置默认模型",
+            "effort": (developer["effort"] if phase == "CODE" and developer["model"] else
+                       _clean(settings.get("reasoning_effort"), 40)) or "默认"}
     if (phase == "CODE" and coder == "claude" and task.get("kind") != "art" and
             claude.get("subscription_coding")):
         developer = next(node for node in nodes if node["id"] == "code")
@@ -1527,6 +1597,8 @@ def collect_snapshot(config_path: Path) -> dict:
         operation_phase = state.get("blocked_from") if phase == "BLOCKED" else phase
         if not isinstance(operation_phase, str) or operation_phase not in _PHASES:
             operation_phase = phase
+        if operation_phase == "CODE" and coding_provider == "codex":
+            snapshot["codex_auth"]["policy"] = "chatgpt"
         # Match Engine's binding without constructing an Engine or provider.
         values = {key: config.get(key) for key in ("project_path", "goal", "branch", "base_ref", "checks", "push", "remote", "task_prefix")}
         if "publication" in config:
@@ -1676,11 +1748,13 @@ def collect_snapshot(config_path: Path) -> dict:
             status["started_at"] = None
             if not owns_operation:
                 directory = None
-        codex_kind = {"PLAN": "plan", "REPLAN": "plan", "REVIEW": "review", "MILESTONE_REVIEW": "review"}.get(operation_phase)
-        codex_operation = kind == "review" or (kind == "plan" and planning_name == "Codex")
+        codex_kind = {"PLAN": "plan", "REPLAN": "plan", "CODE": "code" if coding_provider == "codex" else None,
+                      "REVIEW": "review", "MILESTONE_REVIEW": "review"}.get(operation_phase)
+        codex_operation = kind == "review" or (kind == "plan" and planning_name == "Codex") or (
+            kind == "code" and operation.get("coding_provider") == "codex")
         if directory and owns_operation and codex_kind and kind == codex_kind and codex_operation:
             mode, directory = _codex_route(runtime, directory, codex_kind)
-            snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt")
+            snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt" and kind != "code")
         elif directory and owns_operation and (
                 kind == "code" and operation.get("coding_provider") == "claude" or
                 kind == "plan" and operation.get("planning_provider") == "claude"):

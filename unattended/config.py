@@ -31,6 +31,11 @@ def claude_coding_settings(config: dict) -> dict:
     return settings
 
 
+def codex_coding_settings(config: dict) -> tuple[str, str]:
+    settings = config.get("codex", {})
+    return settings.get("coding_model", "gpt-6.2-sol"), settings.get("coding_reasoning_effort", "high")
+
+
 def validate_model_settings(settings: dict, role: str) -> None:
     if "model" in settings:
         model = settings["model"]
@@ -266,8 +271,8 @@ def load_config(path: Path) -> dict:
         if not isinstance(publication["goal"], str) or not publication["goal"].strip():
             raise ValueError("publication.goal 必须明确填写阶段完整范围及完成条件。")
     coder = config.get("coding_provider", "dsh")
-    if coder not in ("dsh", "claude"):
-        raise ValueError("coding_provider 必须为 dsh 或 claude。")
+    if coder not in ("dsh", "claude", "codex"):
+        raise ValueError("coding_provider 必须为 dsh、claude 或 codex。")
     planner = config.setdefault("planning_provider", "codex")
     if planner not in ("codex", "claude"):
         raise ValueError("planning_provider 必须为 codex 或 claude。")
@@ -291,6 +296,8 @@ def load_config(path: Path) -> dict:
             config[key]["patches"] = [_path(x, path.parent) for x in config[key]["patches"]]
     if config["codex"].get("sandbox", "read-only") != "read-only":
         raise ValueError("Codex 规划和验收必须使用 read-only。")
+    coding_model, coding_effort = codex_coding_settings(config)
+    validate_model_settings({"model": coding_model, "reasoning_effort": coding_effort}, "codex")
     review_transport = config["codex"].get("review_transport", "codex")
     if review_transport not in ("codex", "responses_api"):
         raise ValueError("codex.review_transport 必须为 codex 或 responses_api。")
@@ -330,7 +337,7 @@ def load_config(path: Path) -> dict:
                 validate_model_settings(critical, "claude")
             except ValueError as error:
                 raise ValueError("Claude 关键规划模型配置无效。" + str(error)) from error
-    if coder == "claude":
+    if coder in {"claude", "codex"} and "claude" in (planner, coder):
         planned_tests = config["claude"].get("planned_core_tests", False)
         if type(planned_tests) is not bool:
             raise ValueError("claude.planned_core_tests 必须为布尔值。")
@@ -357,10 +364,10 @@ def load_config(path: Path) -> dict:
     if "task_replanning" in config:
         config["task_replanning"] = validate_task_replanning_settings(config["task_replanning"])
         if config["task_replanning"]["enabled"] and (
-                planner != "claude" or coder != "claude" or "art_pipeline" in config or
+                planner != "claude" or coder not in {"claude", "codex"} or "art_pipeline" in config or
                 not config.get("claude", {}).get("critical_plan_model") or
                 not config.get("claude", {}).get("critical_plan_reasoning_effort")):
-            raise ValueError("task_replanning 需要主功能 Claude 规划/编码及明确的 critical_plan_model/critical_plan_reasoning_effort。")
+            raise ValueError("task_replanning 需要主功能 Claude 规划、Claude 或 Codex 编码，以及明确的 critical_plan_model 和 critical_plan_reasoning_effort。")
     return config
 
 
@@ -410,7 +417,8 @@ def doctor(config: dict) -> dict:
         # Doctor is an inventory, including during an incomplete desktop update.
         checks["codex_available"] = False
     direct_review = config["codex"].get("review_transport", "codex") == "responses_api"
-    codex_cli_required = not direct_review or config.get("planning_provider", "codex") == "codex"
+    coder = config.get("coding_provider", "dsh")
+    codex_cli_required = not direct_review or config.get("planning_provider", "codex") == "codex" or coder == "codex"
     checks["codex_cli_required"] = codex_cli_required
     checks["review_transport"] = "responses_api" if direct_review else "codex"
     api_mode = direct_review or config["codex"].get("auth_mode") == "api_key"
@@ -438,8 +446,10 @@ def doctor(config: dict) -> dict:
             except (ProviderError, ValueError):
                 claude_auth_ready = False
             checks["claude_api_key_configured"] = claude_auth_ready
-    if config.get("coding_provider", "dsh") == "claude":
+    if coder == "claude":
         coder_ready = checks["claude_available"]
+    elif coder == "codex":
+        coder_ready = checks["codex_available"]
     else:
         dsh = config["dsh"]
         checks["dsh_available"] = bool(dsh.get("command") and (shutil.which(dsh["command"][0]) or Path(dsh["command"][0]).is_file())) or (Path(dsh.get("desktop_install", "")) / "DeepSeek Harness.exe").is_file()

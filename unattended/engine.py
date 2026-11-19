@@ -14,7 +14,7 @@ import uuid
 
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from .calendar import WorkCalendar
-from .config import ART_CODING_MODEL, claude_coding_settings, claude_execution_model
+from .config import ART_CODING_MODEL, claude_coding_settings, claude_execution_model, codex_coding_settings
 from . import gitops
 from .providers import (AgentProviders, ProviderError, _responses_api_receipt, codex_result_directory,
                         read_session, validate_output)
@@ -714,8 +714,9 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         """Bind a coding session to one task, including legacy completed receipts."""
         if not session_id:
             return
-        if task.get("coding_provider") == "claude" and task.get("session_id") not in (None, session_id):
-            raise RuntimeError("Claude Code returned a different session from the active task.")
+        if task.get("coding_provider") in {"claude", "codex"} and task.get("session_id") not in (None, session_id):
+            provider = "Codex" if task["coding_provider"] == "codex" else "Claude Code"
+            raise RuntimeError(f"{provider} returned a different session from the active task.")
         if task.get("session_owner_task_id", task["id"]) != task["id"]:
             raise RuntimeError("DSH session owner differs from the current task.")
         path = self.runtime / "dsh-sessions.json"
@@ -765,10 +766,14 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             if kind != "review":
                 raise RuntimeError("Only API review operations can carry a continuation source.")
             op["resume_from"] = str(resume_from)
-        if kind == "code" and self.config.get("coding_provider") == "claude":
-            coding_settings = claude_coding_settings(self.config)
-            op.update(coding_provider="claude", coding_model=coding_settings.get("model"),
-                      coding_reasoning_effort=coding_settings.get("reasoning_effort"),
+        coder = self.config.get("coding_provider", "dsh")
+        if kind == "code" and coder in {"claude", "codex"}:
+            if coder == "codex":
+                model, effort = codex_coding_settings(self.config)
+            else:
+                settings = claude_coding_settings(self.config)
+                model, effort = settings.get("model"), settings.get("reasoning_effort")
+            op.update(coding_provider=coder, coding_model=model, coding_reasoning_effort=effort,
                       code_base=(state.get("task") or {}).get("code_base"),
                       requested_session_id=(state.get("task") or {}).get("session_id"))
         if kind == "code" and (state.get("task") or {}).get("kind") == "art":
@@ -937,19 +942,25 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         prompt = ("你参与一个已授权的单机、单项目、串行开发闭环。请先读取仓库 AGENTS.md、项目文档和真实 Git 状态。\n"
                 "总体开发目标：\n" + self.config["goal"] + "\n"
                 "只依据实际代码、命令、日志和证据作结论；缺少必要信息或运行证据不得宣布完成或验收通过。\n")
+        coder = self.config.get("coding_provider", "dsh")
         if self.config.get("planning_provider", "codex") == "claude":
-            coder = "Claude Code（CC）" if self.config.get("coding_provider") == "claude" else "DSH"
-            prompt += (f"用户当前分工：Claude Code（CC）规划任务，{coder}负责编码和本地提交，Codex 负责独立任务验收和阶段验收。\n")
+            coder_name = {"codex": "Codex", "claude": "Claude Code（CC）", "dsh": "DSH"}[coder]
+            prompt += (f"用户当前分工：Claude Code（CC）规划任务，{coder_name}负责编码和本地提交，Codex 负责独立任务验收和阶段验收。\n")
             if self.config["claude"].get("critical_plan_model"):
                 settings = self.config["claude"]
-                coding_model = claude_coding_settings(self.config).get("model", settings["model"])
+                coding_model = (codex_coding_settings(self.config)[0] if coder == "codex" else
+                                claude_coding_settings(self.config).get("model", settings["model"]))
                 prompt += (f"用户规划分工：{settings['model']} 规划常规任务并判断实际改动范围；"
                            f"关键系统任务和阶段完成提案由 {settings['critical_plan_model']} 完成最终规划，"
                            f"编码使用 {coding_model}。\n")
-        elif self.config.get("coding_provider") == "claude":
+        elif coder == "claude":
             prompt += "用户当前分工：Codex 只发布任务书与独立验收，Claude Code（CC）负责编码和本地提交。\n"
-        if self.config.get("coding_provider") == "claude":
+        elif coder == "codex":
+            prompt += "Codex 在独立会话中分别负责规划、编码与本地提交、独立验收。\n"
+        if coder == "claude":
             prompt += "历史任务书、反馈和文档中的 DSH 开发职责由 CC 接续。\n"
+        elif coder == "codex":
+            prompt += "原任务书与验收反馈中的编码和本地提交职责由 Codex 接续，继续按既有验收条件交付。\n"
         publication = self._publication()
         if publication:
             prompt += (f"当前用户最新发布策略：只完成里程碑 {publication['milestone_id']}，其完整边界与完成条件如下：\n"
@@ -984,8 +995,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 selection.get("planning_level") not in {"routine", "critical"} or
                 self.config.get("planning_provider", "codex") != "claude"):
             raise RuntimeError("规划模型断点与当前提供方或 HEAD 不匹配。")
-        planned_tests = (self.config.get("coding_provider") == "claude" and
-                         self.config["claude"].get("planned_core_tests") is True)
+        planned_tests = (self.config.get("coding_provider") in {"claude", "codex"} and
+                         self.config.get("claude", {}).get("planned_core_tests") is True)
         publication = self._publication()
         completion_rule = ("里程碑系统工作完成后返回 action=complete 提交阶段提案，人工待办可继续保留。\n"
                            if publication else "全部目标完成后返回 action=complete。\n")
@@ -1099,8 +1110,9 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         task.update(planning)
         if planning and selection.get("source_output_dir"):
             task["planning_source_output_dir"] = selection["source_output_dir"]
-        if self.config.get("coding_provider") == "claude":
-            task["coding_provider"] = "claude"
+        coder = self.config.get("coding_provider", "dsh")
+        if coder in {"claude", "codex"}:
+            task["coding_provider"] = coder
         if core_tests is not None:
             task["core_tests"] = core_tests
         title = result["title"] if result["title"].startswith(task_id) else task_id + " " + result["title"]
@@ -1428,7 +1440,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         coder = self.config.get("coding_provider", "dsh")
         if task.get("coding_provider", "dsh") != coder:
             raise RuntimeError("任务的编码会话需要先完成提供方交接。")
-        coder_name = "Claude Code" if coder == "claude" else "DSH"
+        coder_name = {"claude": "Claude Code", "codex": "Codex", "dsh": "DSH"}[coder]
         self._validate_operation_task(state)
         self._claim_session(task, task.get("session_id"))
         current = gitops.head(work)
@@ -1464,6 +1476,11 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "\n当前工作目录已经是任务仓库。Git 请逐条调用，例如 git status --short、git diff --check，"
                 "不加 git -C，不用 cd、管道或复合命令。"
                 "构建和测试使用前台 Bash，等待本条命令结束再执行下一条。\n")
+        elif coder == "codex" and task.get("core_tests"):
+            prompt += (
+                "\n按项目手册生成最终提交对应的 validation-request.json。"
+                "任务书的核心测试逐项列入顶层 tests，模式为 nullrhi。test_batches 只用于额外批次，"
+                "没有额外批次时省略该字段。调度器在 CHECK 阶段构建并运行独立验证。\n")
         if task.get("code_resume") and task.get("code_failures"):
             prompt += (
                 f"\n执行器交付检查反馈：上次 {coder_name} 协议轮已结束，但相对 "

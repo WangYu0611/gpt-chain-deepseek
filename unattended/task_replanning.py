@@ -13,6 +13,7 @@ import re
 
 from . import gitops
 from .providers import ProviderError, claude_result_directory, read_session, validate_output
+from .config import codex_coding_settings
 from .storage import read_json, write_json
 from .ue_checks import _safe_under
 
@@ -193,13 +194,15 @@ class TaskReplanning:
         scope = {key: deepcopy(task.get(key)) for key in
                  ("id", "title", "body", "acceptance_criteria", "core_tests", "base_sha", "coding_provider")}
         scope["checks"] = deepcopy(effective_checks)
+        coder = self.config.get("coding_provider")
+        settings = self.config.get("claude", {})
+        model, effort = (codex_coding_settings(self.config) if coder == "codex" else
+                         (settings.get("model"), settings.get("reasoning_effort")))
         result = {"head_sha": head, "review_round": round_, "scope_sha256": self._replanning_digest(scope),
                 "review_sha256": files.get(str(review_path)), "delivery_sha256": files.get(str(delivery_path)),
                 "check_results_sha256": self._replanning_digest(checks), "evidence_files": files,
                 "coding_session_sha256": self._replanning_digest(task.get("session_id")),
-                "coding_settings_sha256": self._replanning_digest({"provider": self.config.get("coding_provider"),
-                    "model": self.config.get("claude", {}).get("model"),
-                    "reasoning_effort": self.config.get("claude", {}).get("reasoning_effort")})}
+                "coding_settings_sha256": self._replanning_digest({"provider": coder, "model": model, "reasoning_effort": effort})}
         if code_timeout:
             capture = claude_result_directory("code", out)
             capture = _safe_under(out, capture.relative_to(out))
@@ -291,11 +294,11 @@ class TaskReplanning:
             return False
         task = state.get("task") or {}
         settings = self.config.get("claude", {})
-        if (task.get("kind") == "art" or task.get("coding_provider") != "claude" or
-                self.config.get("planning_provider") != "claude" or
-                self.config.get("coding_provider") != "claude" or not settings.get("critical_plan_model") or
+        coder = self.config.get("coding_provider")
+        if (task.get("kind") == "art" or coder not in {"claude", "codex"} or task.get("coding_provider") != coder or
+                self.config.get("planning_provider") != "claude" or not settings.get("critical_plan_model") or
                 not settings.get("critical_plan_reasoning_effort")):
-            raise ValueError("同任务重新规划需要已配置的 Claude 关键规划模型和原 Claude 编码任务。")
+            raise ValueError("同任务重新规划需要已配置的 Claude 关键规划模型和匹配当前编码提供方的功能任务。")
         history = self._epoch_replanning_history(task)
         if len(history) >= policy["max_cycles"]:
             self._block(state, source_phase, "同任务重新规划窗口已用完；原验收仍未通过。" + feedback)

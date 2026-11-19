@@ -7,9 +7,9 @@ import json
 from pathlib import Path
 import re
 
-from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_coding_settings, load_config
 from .calendar import BEIJING
-from .dashboard_state import _clean, _confined, _iso, _object
+from .dashboard_state import _CODING_NAMES, _clean, _confined, _iso, _object
 
 NODE_IDS = {
     "development": ("routine_plan", "critical_plan", "code", "check", "review", "publish", "milestone_review", "milestone_publish"),
@@ -63,7 +63,7 @@ def _development(snapshot, config):
     current = workflow.get("current")
     current = current if current in NODE_IDS["development"] else None
     roles = {"routine_plan": ("Claude Code" if config.get("planning_provider") == "claude" else "Codex"),
-             "critical_plan": "Claude Code", "code": "Claude Code" if config.get("coding_provider") == "claude" else "DSH",
+             "critical_plan": "Claude Code", "code": _CODING_NAMES[config.get("coding_provider", "dsh")],
              "check": "UE / 控制器", "review": "Codex", "milestone_review": "Codex",
              "publish": "控制器", "milestone_publish": "Git / 控制器"}
     nodes = []
@@ -83,6 +83,9 @@ def _development(snapshot, config):
         if not model and active and identity in {"review", "milestone_review"}:
             settings = config.get("codex", {})
             model, effort, source = settings.get("model"), settings.get("reasoning_effort"), "configured"
+        elif not model and active and identity == "code" and config.get("coding_provider") == "codex":
+            model, effort = codex_coding_settings(config)
+            source = "configured"
         nodes.append(_node("development", identity, _clean(row.get("title"), 100), actor=roles[identity],
                            state=row.get("state"), current=active, summary=summary, reason=reason,
                            model=model, effort=effort, source=source))

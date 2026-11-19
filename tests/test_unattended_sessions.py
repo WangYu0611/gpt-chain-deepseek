@@ -99,6 +99,23 @@ class SessionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "previously used"):
                 self.f.engine._invoke(state, "code", "new task", self.f.work)
 
+    def test_codex_coding_intent_records_separate_model_and_owned_session(self):
+        self.f.config.update(coding_provider="codex", codex={
+            "model": "review-model", "reasoning_effort": "low",
+            "coding_model": "gpt-6.2-sol", "coding_reasoning_effort": "high",
+        })
+        self.f.engine = self.f.restart()
+        state = self.f.plan()
+        self.assertEqual(state["task"]["coding_provider"], "codex")
+        state["task"]["session_id"] = "session-native"
+        op = self.f.engine._new_operation(state, "code")
+        self.assertEqual((op["coding_provider"], op["coding_model"], op["coding_reasoning_effort"]),
+                         ("codex", "gpt-6.2-sol", "high"))
+        self.assertEqual(op["requested_session_id"], "session-native")
+        self.assertEqual(op["code_base"], gitops.head(self.f.work))
+        with self.assertRaisesRegex(RuntimeError, "Codex returned a different session"):
+            self.f.engine._claim_session(state["task"], "session-foreign")
+
     def test_manual_rework_uses_latest_feedback_resets_session_once_and_keeps_cap(self):
         before, _ = self.blocked_review()
         old = before["task"]["session_id"]

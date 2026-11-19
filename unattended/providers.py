@@ -27,7 +27,7 @@ from github_harness_lab.lab_harness.dsh_legacy import VERIFIED_VERSION, parse_le
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import ue_checks
 from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS, claude_coding_settings,
-                     validate_art_pipeline_settings, validate_model_settings)
+                     codex_coding_settings, validate_art_pipeline_settings, validate_model_settings)
 from .secrets import read_secret, validate_api_base_url
 from .network import proxy_environment
 from .storage import atomic_replace, write_text
@@ -887,9 +887,11 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
             return None
         # Limit this behavior to the already-authorized API -> subscription
         # route. An unrelated child directory cannot supply retry evidence.
-        subscription_fallback = (kind in {"plan", "review"} and record.get("codex_auth_mode") == "chatgpt" and
+        codex_code = kind == "code" and record.get("coding_provider") == "codex" and record.get("coding_protocol") == "codex_exec_v1"
+        dsh_code = kind == "code" and not codex_code
+        subscription_fallback = codex_code or (kind in {"plan", "review"} and record.get("codex_auth_mode") == "chatgpt" and
                                  out.name == _CODEX_SUBSCRIPTION_DIR and _codex_api_quota_failed(kind, out.parent))
-        events, skipped, session = _failure_events(out / "stdout.log", kind)
+        events, skipped, session = _failure_events(out / "stdout.log", "review" if codex_code else kind)
         stderr = _failure_tail(out / "stderr.log", _FAILURE_STDERR_LIMIT)[0].decode("utf-8-sig")
         if _PERMANENT_FAILURE.search(stderr):
             return None
@@ -903,7 +905,7 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
             if final_seen:
                 return None
             if event_type in {"session", "thread.started"}:
-                if skipped or index != 0 or event_type != ("session" if kind == "code" else "thread.started"):
+                if skipped or index != 0 or event_type != ("session" if dsh_code else "thread.started"):
                     return None
             elif event_type == "error":
                 error = event.get("error", event)
@@ -911,8 +913,8 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
                     return None
                 errors.append(error)
                 observed_errors.append(error)
-                terminal_error = kind == "code"
-            elif kind == "code" and event_type == "status":
+                terminal_error = dsh_code
+            elif dsh_code and event_type == "status":
                 phase = event.get("phase")
                 if phase in {"turn_start", "turn_end"}:
                     turn = event.get("turn")
@@ -933,7 +935,7 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
                         errors = [reason["error"]] if terminal_error and type(reason.get("error")) is dict else []
                         observed_errors.extend(errors)
                         active_turn = None
-            elif kind == "code" and event_type == "final":
+            elif dsh_code and event_type == "final":
                 if active_turn is not None or ("sessionId" in event and event["sessionId"] != session):
                     return None
                 reason = event.get("reason")
@@ -946,17 +948,17 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
                     errors = [reason["error"]] if terminal_error and type(reason.get("error")) is dict else []
                     observed_errors.extend(errors)
                 final_seen = True
-            elif kind != "code" and event_type == "turn.started":
+            elif not dsh_code and event_type == "turn.started":
                 if turn_started:
                     return None
                 turn_started = True
-            elif kind != "code" and event_type == "turn.failed":
+            elif not dsh_code and event_type == "turn.failed":
                 if not turn_started or type(event.get("error")) is not dict:
                     return None
                 errors.append(event["error"])
                 observed_errors.append(event["error"])
                 terminal_error, final_seen = True, True
-            elif kind != "code" and event_type == "turn.completed":
+            elif not dsh_code and event_type == "turn.completed":
                 return None
         # A native top-level limit error may be the last event before a nonzero
         # CLI exit; it is still distinct from quoted tool/model item content.
@@ -1109,6 +1111,93 @@ def parse_codex_events(path: Path, *, exit_code: int) -> dict:
     return {"session_id": session, "event_count": count, "reconnect_notices": reconnects}
 
 
+def _codex_coding_profile(cwd: Path, out: Path, environment: dict) -> tuple[list[str], list[str]]:
+    roots = []
+    for flag in ("--absolute-git-dir", "--git-common-dir"):
+        try:
+            result = subprocess.run(["git", "-c", "core.fsmonitor=false", "-C", str(cwd), "rev-parse", flag],
+                                    env=environment, capture_output=True, timeout=10,
+                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            raw = result.stdout.decode("utf-8-sig").strip()
+            if result.returncode or not raw or len(raw) > 4096:
+                raise ValueError
+            path = Path(raw)
+            path = (cwd / path).resolve() if not path.is_absolute() else path.resolve()
+            if path.parent == path or not path.is_dir():
+                raise ValueError
+            roots.append(path.as_posix())
+        except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+            raise ProviderError("Codex coding requires readable Git metadata for its workspace") from None
+    roots = list(dict.fromkeys(roots))
+    filesystem = {":root": "read", ":workspace_roots": "write",
+                  ":tmpdir": "write", ":slash_tmp": "write", **{path: "write" for path in roots}}
+    name = "coding-" + hashlib.sha256(str(out).encode()).hexdigest()[:16]
+    inline = "{" + ",".join(json.dumps(key) + "=" + json.dumps(value) for key, value in filesystem.items()) + "}"
+    return ["-c", "default_permissions=" + json.dumps(name), "-c", "permissions." + name + ".filesystem=" + inline,
+            "-c", "permissions." + name + ".network.enabled=false"], roots
+
+
+def _codex_coding_context(config: dict, cwd: Path, out: Path, session: str | None) -> dict:
+    context = {"workspace": str(cwd), "output_dir": str(out)}
+    if not config.get("runtime_dir"):
+        return context
+    runtime = Path(config["runtime_dir"]).resolve()
+    if cwd != runtime / "workspace" or out.parent != runtime / "runs":
+        return context
+    try:
+        state = _json_file(runtime / "state.json")
+        task, operation = state["task"], state["operation"]
+        if (state["phase"] != "CODE" or task.get("coding_provider") != "codex" or
+                operation["kind"] != "code" or operation["task_id"] != task["id"] or
+                Path(operation["output_dir"]).resolve() != out or task.get("session_id") != session or
+                operation.get("requested_session_id", session) != session or
+                (session is not None and (task.get("session_owner_task_id") != task["id"] or
+                                         task.get("session_provider", "codex") != "codex"))):
+            raise ValueError
+        context["task_id"] = task["id"]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        raise ProviderError("Codex coding session differs from the active managed task") from None
+    return context
+
+
+def _codex_coding_result(out: Path, record: dict) -> dict:
+    if (record.get("coding_protocol") != "codex_exec_v1" or record.get("coding_sandbox") != "workspace-write" or
+            record.get("codex_auth_mode") != "chatgpt"):
+        raise ProviderError("Saved Codex coding receipt has an invalid native execution policy")
+    facts = parse_codex_events(out / "stdout.log", exit_code=record["exit_code"])
+    session = facts["session_id"]
+    if not _CLAUDE_SESSION.fullmatch(session) or record.get("session_id") != session:
+        raise ProviderError("Saved Codex coding receipt has a conflicting native thread")
+    requested = record.get("requested_session")
+    if requested is not None and requested != session:
+        raise ProviderError("Codex resumed a different thread from the designated coding session")
+    final = None
+    with (out / "stdout.log").open(encoding="utf-8-sig") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            event = _strict_json(line)
+            if event.get("type") == "thread.started" and event.get("model") is not None:
+                observed, expected = event["model"], record.get("coding_model")
+                if (not isinstance(observed, str) or not isinstance(expected, str) or
+                        (observed != expected and not re.fullmatch(re.escape(expected) + r"-\d{4}-\d{2}-\d{2}", observed))):
+                    raise ProviderError("Codex coding native metadata names a different model")
+            item = event.get("item")
+            if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+                final = item.get("text")
+    if not isinstance(final, str) or not final.strip():
+        raise ProviderError("Codex coding completed without a native final response")
+    final = final.strip()
+    sidecar = out / "final.txt"
+    if sidecar.exists():
+        if sidecar.is_symlink() or sidecar.stat().st_size > 2 * 1024 * 1024 or sidecar.read_text(encoding="utf-8-sig").strip() != final:
+            raise ProviderError("Saved Codex coding final response differs from its native turn")
+    value = {"session_id": session, "text": final, "completed": True}
+    if (out / "result.json").exists() and _json_file(out / "result.json") != value:
+        raise ProviderError("Saved Codex coding result differs from its native turn")
+    return value
+
+
 def read_session(out: Path, *, requested_session: str | None = None) -> str | None:
     """Read only the opening session identity, including after a killed run."""
     pending_session = None
@@ -1140,6 +1229,14 @@ def read_session(out: Path, *, requested_session: str | None = None) -> str | No
                     return None
                 identity = (event.get("sessionId") if event.get("type") == "session" else
                             event.get("thread_id") if event.get("type") == "thread.started" else None)
+                if event.get("type") == "thread.started":
+                    receipt = Path(out) / "process.json"
+                    if requested_session is None and receipt.is_file():
+                        record = _json_file(receipt, limit=16384)
+                        if record.get("coding_provider") == "codex":
+                            requested_session = record.get("requested_session")
+                    if requested_session is not None and identity != requested_session:
+                        return None
                 return identity if isinstance(identity, str) and _SESSION.fullmatch(identity) else None
     except (OSError, UnicodeError, ValueError, AttributeError):
         pass
@@ -2157,7 +2254,7 @@ class AgentProviders:
         out.mkdir(parents=True, exist_ok=True)
         schema = REVIEW_SCHEMA
         if kind == "plan":
-            planned = (self.config.get("coding_provider") == "claude" and
+            planned = (self.config.get("coding_provider") in {"claude", "codex"} and
                        self.config.get("claude", {}).get("planned_core_tests") is True)
             schema = PLAN_WITH_CORE_TESTS_SCHEMA if planned else PLAN_SCHEMA
         _atomic_json(out / "schema.json", schema)
@@ -2226,6 +2323,8 @@ class AgentProviders:
 
     def code(self, prompt: str, cwd: Path, out: Path, timeout: float,
              session_id: str | None = None) -> dict:
+        if self.config.get("coding_provider") == "codex":
+            return self._codex_code(prompt, cwd, out, timeout, session_id)
         if self.config.get("coding_provider", "dsh") == "claude":
             return self._claude_code(prompt, cwd, out, timeout, session_id)
         settings = self.config.get("dsh", {})
@@ -2315,6 +2414,59 @@ class AgentProviders:
             raise ProviderError("DSH completed without a durable result", session_id=read_session(out))
         _atomic_json(out / "result.json", recovered)
         return recovered
+
+    def _codex_code(self, prompt: str, cwd: Path, out: Path, timeout: float, session_id: str | None) -> dict:
+        cwd, out = Path(cwd).resolve(), Path(out).resolve()
+        if session_id is not None and (not isinstance(session_id, str) or not _CLAUDE_SESSION.fullmatch(session_id)):
+            raise ProviderError("Codex coding resume requires the designated native thread UUID")
+        if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "final.txt", "result.json")):
+            raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
+        model, effort = codex_coding_settings(self.config)
+        try:
+            validate_model_settings({"model": model, "reasoning_effort": effort}, "codex")
+        except ValueError as error:
+            raise ProviderError(str(error)) from error
+        context = _codex_coding_context(self.config, cwd, out, session_id)
+        settings = self.config.get("codex", {})
+        command = _codex_command(settings.get("command"))
+        environment = safe_environment()
+        environment.update(proxy_environment(config_path=self.config.get("config_path"),
+                                               secrets_file=self.config.get("secrets_file"), network_file=self.config.get("network_file")))
+        for name in ("CODEX_HOME", "NODE_EXTRA_CA_CERTS"):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        deadline = time.monotonic() + timeout
+        profile, git_roots = _codex_coding_profile(cwd, out, environment)
+        try:
+            self._check_codex_subscription(command, cwd, environment, deadline)
+        except ProviderError as error:
+            raise ProviderError("Codex coding requires a saved native ChatGPT login", interrupted=error.interrupted) from None
+        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile, "--color", "never"]
+        if session_id is not None:
+            argv.append("resume")
+        argv.extend(["--json", "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
+                     "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
+                     "-c", 'shell_environment_policy.filters={CODEX_API_KEY="exclude",OPENAI_API_KEY="exclude",ANTHROPIC_API_KEY="exclude",ANTHROPIC_AUTH_TOKEN="exclude"}',
+                     "-c", "shell_environment_policy.ignore_default_excludes=false"])
+        if session_id is not None:
+            argv.append(session_id)
+        argv.append("-")
+        if settings.get("coding_instructions"):
+            prompt += "\n" + str(settings["coding_instructions"])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("Codex coding exhausted its time budget before the request", interrupted=True)
+        out.mkdir(parents=True, exist_ok=True)
+        self._invoke("code", argv, prompt, cwd, out, remaining, environment, requested_session=session_id,
+                     coding_provider="codex", coding_model=model, coding_reasoning_effort=effort,
+                     codex_auth_mode="chatgpt", coding_protocol="codex_exec_v1", coding_sandbox="workspace-write",
+                     coding_context=context, coding_writable_git_roots=git_roots)
+        result = self.recover("code", out)
+        if result is None:
+            raise ProviderError("Codex coding completed without a durable native result", session_id=read_session(out))
+        write_text(out / "final.txt", result["text"] + "\n")
+        _atomic_json(out / "result.json", result)
+        return result
 
     def _claude_invoke(self, kind: str, argv: list[str], prompt: str, cwd: Path, out: Path,
                        timeout: float, environment: dict[str, str], settings: dict, **options) -> None:
@@ -2409,7 +2561,7 @@ class AgentProviders:
         out = Path(out).resolve()
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
-        planned = (self.config.get("coding_provider") == "claude" and
+        planned = (self.config.get("coding_provider") in {"claude", "codex"} and
                    settings.get("planned_core_tests") is True)
         schema = STRICT_PLAN_WITH_CORE_TESTS_SCHEMA if planned else PLAN_SCHEMA
         if tiered is None:
@@ -2603,7 +2755,9 @@ class AgentProviders:
                 codex_auth_mode: str | None = None,
                 codex_subscription_fallback: bool = False,
                 claude_auth_mode: str | None = None, claude_subscription_fallback: bool = False,
-                claude_api_provider: str | None = None, claude_fallback_source: dict | None = None) -> None:
+                claude_api_provider: str | None = None, claude_fallback_source: dict | None = None,
+                coding_protocol: str | None = None, coding_sandbox: str | None = None,
+                coding_context: dict | None = None, coding_writable_git_roots: list[str] | None = None) -> None:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ProviderError("A nonempty provider prompt is required")
         # A reused invocation directory must never re-run an external action.
@@ -2613,6 +2767,11 @@ class AgentProviders:
                                                 "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
                    if environment.get(key)]
         receipt_fields = {"coding_provider": coding_provider} if coding_provider else {}
+        if coding_provider == "codex":
+            from .secrets import secret_values
+            secrets.extend(secret_values(config_path=self.config.get("config_path"), secrets_file=self.config.get("secrets_file")))
+            receipt_fields.update(coding_protocol=coding_protocol, coding_sandbox=coding_sandbox,
+                                  coding_writable_git_roots=coding_writable_git_roots, **(coding_context or {}))
         if claude_auth_mode is not None:
             receipt_fields.update(claude_auth_mode=claude_auth_mode, claude_subscription_fallback=claude_subscription_fallback)
         if claude_api_provider is not None:
@@ -2667,7 +2826,7 @@ class AgentProviders:
                                  max_output_bytes=capture_limit,
                                  secrets=secrets, **capture_options)
         except (OSError, RuntimeError, ValueError) as error:
-            updating = (kind in {"plan", "review"} and isinstance(error, OSError) and
+            updating = ((kind in {"plan", "review"} or coding_provider == "codex") and isinstance(error, OSError) and
                         (getattr(error, "errno", None) == errno.ENOENT or getattr(error, "winerror", None) in {2, 3}) and
                         _bundled_codex_root(argv[0]) is not None and not Path(argv[0]).is_file())
             record = {
@@ -2851,6 +3010,8 @@ class AgentProviders:
             elif kind == "code":
                 if not (out / "stdout.log").is_file():
                     return None
+                if record.get("coding_provider") == "codex":
+                    return _codex_coding_result(out, record)
                 if record.get("coding_provider") == "claude":
                     if record.get("native_protocol") is not None or record.get("user_repair_profile") is not None:
                         context = _claude_repair_context(self.config, Path(record["workspace"]), managed_out,

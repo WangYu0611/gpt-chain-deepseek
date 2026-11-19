@@ -1,12 +1,12 @@
 # Codex / dsh 单机无人值守闭环
 
-这一入口在一台电脑上管理一个 Git 项目，串行执行规划、编码与本地提交、独立检查、Codex 验收，再按结果返工或进入下一任务。规划可选择 Codex 或 Claude Code，编码可选择 dsh 或 Claude Code。任务书保存在配置指定的运行目录，不依赖 ChatGPT 网页定时任务或 GitHub 事件触发。
+这一入口在一台电脑上管理一个 Git 项目，串行执行规划、编码与本地提交、独立检查、Codex 验收，再按结果返工或进入下一任务。规划可选择 Codex 或 Claude Code，编码可选择 Codex、dsh 或 Claude Code。任务书保存在配置指定的运行目录，不依赖 ChatGPT 网页定时任务或 GitHub 事件触发。
 
 ## 状态面板与飞书简报
 
 双击工具目录的 `打开运行面板.cmd`，或执行 `unattended.cmd dashboard`。默认地址为 `http://127.0.0.1:8765/`，每 3 秒更新。首屏显示当前任务、下一步、后台心跳和连续失败次数。独立检查区显示通过、执行中和跳过的项目。Codex 卡片显示配置的认证策略，能从当前执行确认时显示实际使用的 API 或订阅。未提供原始时间戳的模型活动显示为“本轮记录”，最近活动时间取日志实际修改时间。
 
-运行面板按流程、职责模块、任务证据与历史记录组织。流程图展示 Sonnet 初拟分级、可选 Opus 定稿、Sonnet 开发、独立检查、Codex 审核及任务登记，阶段审核与发布单独显示。点击流程节点可定位并展开对应模块。六张职责卡片显示各自的模型、当前状态、任务及最近活动。缺少历史模型回执时，配置值会明确标注。返工时保留的旧检查结果标为上一轮，等待新提交后重新检查。暂停、等待额度、心跳过期和连接中断都有独立显示。
+运行面板按流程、职责模块、任务证据与历史记录组织。流程图展示常规规划、关键规划、开发、独立检查、审核及任务登记，阶段审核与发布单独显示。点击流程节点可定位并展开对应模块。职责卡片显示各自的模型、当前状态、任务及最近活动。缺少历史模型回执时，配置值会明确标注。返工时保留的旧检查结果标为上一轮，等待新提交后重新检查。暂停、等待额度、心跳过期和连接中断都有独立显示。
 
 面板是只读服务，不启动新开发步骤、不清除断点、不调用模型；仅监听本机回环地址，不向局域网公开。查看面板不会占用 Codex/dsh 模型额度。关闭网页后服务与夜间开发继续运行。独立 Windows 登录任务 `CodexDSHPanel-<配置标识>` 负责恢复面板和简报监测，不依赖浏览器一直打开，也不重启正在编码的引擎。
 
@@ -50,7 +50,9 @@ Windows 临时拒绝替换断点、心跳或模型回执文件时（WinError 5/3
 
 ## 首次配置
 
-本机当前由 Claude `claude-sonnet-5-5`、`reasoning_effort: "high"` 负责规划与编码，Codex `gpt-6-astra`、`reasoning_effort: "high"` 负责独立验收。配置位于 `claude` / `codex` 对象中。
+本机当前由 Claude `claude-fable-5-2` / `high` 负责规划，Codex `gpt-6.2-sol` / `high` 负责编码，OpenAI Responses API 的 `gpt-6-astra` / `high` 负责独立验收。
+
+设置 `coding_provider: "codex"` 可使用已登录 ChatGPT 订阅的 Codex CLI 编码。 `codex.coding_model` 和 `codex.coding_reasoning_effort` 分别控制编码模型和思考档位。调度器为每个任务建立独立的编码会话，同一任务返工时继续该任务的会话。验收的 API 密钥、模型和档位由验收配置控制。
 
 Codex 适配器为规划和验收均显式传入 `--model` 与 `-c model_reasoning_effort="high"`。dsh 将档位写入最后叠加的 `agent-default-model.config.reasoningEffort`，并显式覆盖 `llm-deepseek-account.config.thinking: enabled`，避免继承关闭思考的设置；与已有传输重试配置合并。修改后应安全停止并恢复后台，让新进程读取设置。这里的模型设置不会改变已有任务、验收 HEAD、工作日历或 M2 集中推送策略。
 
@@ -90,11 +92,11 @@ API 与已授权的订阅兜底都因额度不足失败时，原生订阅限额�
 
 可用 `claude.max_output_bytes` 单独调整 Claude Code 的单轮日志上限。本机配置为 64 MiB（67108864 字节），变更在执行器重启后生效。执行日志记录会话、工具名称及状态、额度和完成回执。CC 从工作区直接读取源码，代码历史由每轮的本地 Git 提交保存，GitHub 在里程碑验收后集中推送。
 
-启用 `claude.planned_core_tests` 后，任务书会列出 1 至 5 个对应验收条件的核心测试。`core_tests` 字段仅包含完整测试名，验收条件映射和复用说明放在任务书正文。CC 编译成功后，用调度器为这些测试生成的固定命令逐项验证，再做本地提交。独立检查会在提交上复跑清单中的测试，全量回归安排在里程碑验收。
+启用 `claude.planned_core_tests` 后，任务书会列出 1 至 5 个对应验收条件的核心测试。`core_tests` 字段仅包含完整测试名，验收条件映射和复用说明放在任务书正文。Claude Code 可以在编译成功后用调度器生成的固定命令预跑这些测试。独立检查在本地提交上运行清单中的测试，全量回归安排在里程碑验收。
 
-设置 `planning_provider: "claude"` 可将任务规划交给 Claude Code，配合 `coding_provider: "claude"` 使用。规划使用独立只读会话，输出原有任务书和核心测试清单，编码使用任务自己的会话。Codex 负责逐任务独立验收与里程碑最终验收。未设置 `planning_provider` 的配置继续由 Codex 规划。
+设置 `planning_provider: "claude"` 可将任务规划交给 Claude Code，配合 `coding_provider: "codex"` 或 `coding_provider: "claude"` 使用。规划使用独立只读会话，输出原有任务书和核心测试清单，编码使用任务自己的会话。Codex 负责逐任务独立验收与里程碑最终验收。未设置 `planning_provider` 的配置继续由 Codex 规划。
 
-本机日常规划和编码使用 `claude.model: "claude-sonnet-5-5"`。配置 `claude.critical_plan_model: "claude-opus-5-5"` 后，Sonnet 在草案中给出规划级别和理由。日常任务直接进入开发，关键系统草案交给独立 Opus 会话核对与定稿后再进入开发。关键规划包括跨系统架构、复杂依赖拆分、存档格式或迁移契约、核心规则冻结与阶段整体规划，单纯要求保留既有契约的任务按实际改动判断。阶段完成提案也交由 Opus 核对，再进入独立检查与 Codex 阶段验收。两种规划均使用 `high` 思考档，关键规划可单独设置 `claude.critical_plan_reasoning_effort`。所选模型和草案来源写入断点及回执，重启与重试沿用已保存的选择。面板在规划期间显示实际所选模型。
+本机通过 `claude.model` 与 `claude.critical_plan_model` 为两级规划选用 `claude-fable-5-2`。日常任务直接进入开发，关键系统草案交给独立会话核对与定稿后再进入开发。关键规划包括跨系统架构、复杂依赖拆分、存档格式或迁移契约、核心规则冻结与阶段整体规划，单纯要求保留既有契约的任务按实际改动判断。阶段完成提案也交给关键规划会话核对，再进入独立检查与 Codex 阶段验收。两种规划均使用 `high` 思考档，关键规划可单独设置 `claude.critical_plan_reasoning_effort`。所选模型和草案来源写入断点及回执，重启与重试沿用已保存的选择。面板在规划期间显示实际所选模型。
 
 最后一次本地提交后，DSH 将请求写到已忽略的 `Saved/Automation/<任务编号>/validation-request.json`，例如：
 

@@ -119,7 +119,7 @@ def _provider_files(evidence, runtime, directory, *, title="当前操作"):
     if directory.parent != runtime / "runs" or not re.fullmatch(r"(?:code|plan|review|check|art_check|art_diagnose|milestone_check)-[a-f0-9]{32}", directory.name):
         raise ValueError("模型操作目录不匹配")
     kind = directory.name.split("-", 1)[0]
-    route, selected = _codex_route(runtime, directory, kind) if kind in {"plan", "review"} else (None, directory)
+    route, selected = _codex_route(runtime, directory, kind) if kind in {"plan", "code", "review"} else (None, directory)
     subscription = "Codex"
     if selected == directory and kind in {"plan", "code", "art_diagnose"}:
         selected = _claude_directory(runtime, directory, kind)
@@ -137,7 +137,8 @@ def _provider_files(evidence, runtime, directory, *, title="当前操作"):
             keys = ("kind", "exit_code", "timed_out", "output_limit_exceeded", "launch_or_capture_failed", "launch_error",
                     "coding_provider", "coding_model", "coding_reasoning_effort", "planning_provider", "planning_model",
                     "planning_reasoning_effort", "diagnosis_provider", "diagnosis_model", "diagnosis_reasoning_effort",
-                    "model_selection", "retry_reason", "transient", "codex_auth_mode", "claude_auth_mode")
+                    "model_selection", "retry_reason", "transient", "codex_auth_mode", "claude_auth_mode",
+                    "coding_protocol", "coding_sandbox")
             evidence.virtual(label + " · 执行回执", {key: process[key] for key in keys if key in process})
 
 

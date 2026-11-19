@@ -1182,24 +1182,25 @@
     text('failures',number(s.failures));setTone('failures',number(s.failures)>0?'warn':'');
     $('worker-desc').hidden=!w.label||w.healthy===true;
     text('worker-desc',w.label);
-    const codingProvider=data.coding_provider==='claude'?'claude':'dsh';
-    const codingName=codingProvider==='claude'?'Claude Code':'DSH';
+    const codingProvider=['claude','codex'].includes(data.coding_provider)?data.coding_provider:'dsh';
+    const codingName={claude:'Claude Code',codex:'Codex',dsh:'DSH'}[codingProvider];
     const planningName=data.planning_provider==='claude'?'Claude Code':'Codex';
     const [action,detail]=waitingToRetry?['自动重试当前步骤','后台会从'+phase+'继续。']:nextAction(s,w,sch,phase,codingName,planningName);
     text('next-action',action);text('next-detail',detail);
-    text('coder-brand',codingName);text('coder-avatar',codingProvider==='claude'?'CC':'d');
+    text('coder-brand',codingName);text('coder-avatar',{claude:'CC',codex:'CX',dsh:'d'}[codingProvider]);
     document.title=viewLabels[activeView]+' · 无人值守工作台';
-    for(const [slot,key,name] of [['codex','codex','Codex'],['dsh',codingProvider,codingName]]){
+    for(const [slot,key,name] of [['codex','codex','Codex'],['dsh',codingProvider==='codex'?'codex_coding':codingProvider,codingName]]){
       const model=(data.models||{})[key]||{};
       text(slot+'-name',model.name||name);text(slot+'-detail',(model.model||'模型未配置')+' · 思考档 '+(model.effort||'未配置'));
-      const active=executionConfirmed&&s.actor===name;
-      const retrying=providerWaiting&&data.provider_retry?.provider===name;
+      const ownsRole=codingProvider!=='codex'||(slot==='dsh'?phase==='CODE':phase!=='CODE');
+      const active=executionConfirmed&&s.actor===name&&ownsRole;
+      const retrying=providerWaiting&&data.provider_retry?.provider===name&&ownsRole;
       const retryLabel={local_cli_unavailable:'待重试 · 本地 CLI 恢复后继续',claude_subscription_limit:'等待 Claude 额度恢复',codex_subscription_limit:'等待 Codex 额度恢复'}[data.provider_retry?.reason];
       text(slot+'-state',filesystemWaiting?'等待 · 状态文件恢复':retrying?(retryLabel||'待重试 · 服务恢复后继续'):active?'正在执行 · '+phase:'待命');
       setTone(slot+'-state',filesystemWaiting||retrying?'warn':active?'working':'','model-state');
     }
     const auth=data.codex_auth||{};
-    const authPolicy={responses_api:'OpenAI API · Responses 接口',api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录'}[auth.policy];
+    const authPolicy={responses_api:'OpenAI API · Responses 接口',api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录',chatgpt:'Codex 原生订阅 · 开发编码'}[auth.policy];
     const authTiming=s.attempt_finished?'上次走 ':'当前走 ';
     const authLabel=auth.current==='chatgpt'?authTiming+'Codex 订阅'+(auth.fallback?' · API 额度耗尽':''):
       auth.current==='responses_api'?authTiming+'OpenAI API':auth.current==='api_key'?authTiming+'GPT API':authPolicy;

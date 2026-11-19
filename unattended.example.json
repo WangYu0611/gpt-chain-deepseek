@@ -36,6 +36,8 @@
     "command": ["codex.exe"],
     "model": "gpt-6-astra",
     "reasoning_effort": "high",
+    "coding_model": "gpt-6.2-sol",
+    "coding_reasoning_effort": "high",
     "sandbox": "read-only"
   },
   "dsh": {
