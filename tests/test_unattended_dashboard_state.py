@@ -154,6 +154,55 @@ class DashboardStateTests(unittest.TestCase):
         self.write(path, receipt)
         self.assertIsNone(self.snapshot()["codex_auth"]["current"])
 
+    def test_direct_api_review_projects_only_bounded_round_counters_and_receipt_time(self):
+        self.config["codex"].update(review_transport="responses_api", auth_mode="api_key")
+        self.write(self.config_path, self.config)
+        self.state.update(phase="REVIEW", task={"id": "TASK-1", "candidate": {"head_sha": "a" * 40}})
+        directory = self.logs([], kind="review")
+        self.state["operation"].update(task_id="TASK-1", head_sha="a" * 40)
+        turns = [{"number": number, "response_id": f"resp_round{number}", "response_sha256": "b" * 64,
+                  "response_file": f"responses/turn-{number:04d}.json", "raw_payload": "PRIVATE_TOOL_PAYLOAD"}
+                 for number in range(1, 4)]
+        receipt = {"protocol": "openai_responses_v1", "kind": "review", "status": "running", "exit_code": None,
+                   "head_sha": "a" * 40, "turns": turns, "resumed_rounds": 2, "resume_from": "PRIVATE_SOURCE_PATH"}
+        path = directory / "process.json"
+        self.write(path, receipt)
+        modified = self.now.timestamp() - 15
+        os.utime(path, (modified, modified))
+        self.write(self.runtime / "state.json", self.state)
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        result = dashboard.collect_snapshot(self.config_path)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(result["api_review"], {"completed_response_rounds": 3, "resumed_rounds": 2,
+            "api_status": "running", "last_receipt_time": "2026-11-02T11:04:45+00:00"})
+        self.assertIn("已完成 3 轮审核", result["activity"][0]["text"])
+        self.assertIn("续接 2 轮", result["activity"][0]["text"])
+        self.assertEqual(result["status"]["last_activity_age_seconds"], 15)
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+
+        turns[1]["response_file"] = "../PRIVATE_SECRET"
+        self.write(path, receipt)
+        self.assertEqual(self.snapshot()["api_review"]["completed_response_rounds"], 1)
+        self.state["operation"]["head_sha"] = "c" * 40
+        self.assertIsNone(self.snapshot()["api_review"])
+
+    def test_failed_direct_api_progress_preserves_provider_wait_and_next_retry(self):
+        self.config["codex"].update(review_transport="responses_api", auth_mode="api_key")
+        self.write(self.config_path, self.config)
+        self.retry_record("REVIEW")
+        self.state["task"]["candidate"] = {"head_sha": "a" * 40}
+        directory = self.logs([], kind="review")
+        self.state["operation"].update(task_id="TASK-13", head_sha="a" * 40)
+        receipt = {"protocol": "openai_responses_v1", "kind": "review", "status": "failed", "exit_code": 1,
+                   "head_sha": "a" * 40, "turns": [], "failure_detail": "PRIVATE_PROVIDER_ERROR"}
+        self.write(directory / "process.json", receipt)
+        result = self.snapshot()
+        self.assertEqual(result["status"]["code"], "waiting_provider")
+        self.assertIn("19:10:00（北京时间）", result["status"]["summary"])
+        self.assertEqual(result["api_review"]["api_status"], "failed")
+        self.assertIn("等待重试", result["activity"][0]["text"])
+        self.assertNotIn("PRIVATE_", json.dumps(result))
+
     def test_blocked_review_freezes_at_final_subscription_receipt_after_worker_exit(self):
         self.config["codex"].update(auth_mode="api_key", subscription_fallback=True)
         self.write(self.config_path, self.config)

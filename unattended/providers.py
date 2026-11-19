@@ -1975,6 +1975,18 @@ class AgentProviders:
             return self._codex("review", prompt, cwd, out, timeout)
         if transport != "responses_api":
             raise ProviderError("codex.review_transport must be codex or responses_api")
+        return self._responses_review(prompt, cwd, out, timeout)
+
+    def resume_review(self, prompt: str, cwd: Path, out: Path, timeout: float, *, previous_out: Path) -> dict:
+        if self.config.get("codex", {}).get("review_transport", "codex") != "responses_api":
+            raise ProviderError("Review continuation requires the Responses API transport")
+        if Path(previous_out).resolve() == Path(out).resolve():
+            raise ProviderError("Review continuation requires a fresh invocation directory")
+        return self._responses_review(prompt, cwd, out, timeout, resume_from=previous_out)
+
+    def _responses_review(self, prompt: str, cwd: Path, out: Path, timeout: float, *,
+                          resume_from: Path | None = None) -> dict:
+        settings = self.config.get("codex", {})
         try:
             validate_model_settings(settings, "codex")
         except ValueError as error:
@@ -1985,7 +1997,10 @@ class AgentProviders:
             prompt += "\n" + str(settings["review_instructions"])
         art_directory = _codex_art_review_directory(self.config, Path(cwd), Path(out).resolve())
         from . import api_review
-        return api_review.review(self.config, prompt, cwd, out, timeout, art_directory=art_directory)
+        options = {"art_directory": art_directory}
+        if resume_from is not None:
+            options["resume_from"] = resume_from
+        return api_review.review(self.config, prompt, cwd, out, timeout, **options)
 
     def _codex(self, kind: str, prompt: str, cwd: Path, out: Path, timeout: float) -> dict:
         settings = self.config.get("codex", {})

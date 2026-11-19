@@ -16,7 +16,8 @@ from github_harness_lab.lab_harness.process import run_process, safe_environment
 from .calendar import WorkCalendar
 from .config import ART_CODING_MODEL, claude_execution_model
 from . import gitops
-from .providers import AgentProviders, ProviderError, codex_result_directory, read_session, validate_output
+from .providers import (AgentProviders, ProviderError, _responses_api_receipt, codex_result_directory,
+                        read_session, validate_output)
 from .storage import is_windows_sharing_error, lock, read_json, write_json, write_text
 from .art_autonomy import ArtAutonomy
 from .task_replanning import TaskReplanning
@@ -756,10 +757,14 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             raise gitops.WindowClosed("工作窗口已截止。")
         return min(float(maximum), remaining), remaining < maximum
 
-    def _new_operation(self, state, kind):
+    def _new_operation(self, state, kind, *, resume_from=None):
         op = {"kind": kind, "output_dir": str(self.runtime / "runs" / (kind + "-" + uuid.uuid4().hex)),
               "started_at": self.now().isoformat(), "head_sha": gitops.head(self.runtime / "workspace"),
               "task_id": (state.get("task") or {}).get("id")}
+        if resume_from is not None:
+            if kind != "review":
+                raise RuntimeError("Only API review operations can carry a continuation source.")
+            op["resume_from"] = str(resume_from)
         if kind == "code" and self.config.get("coding_provider") == "claude":
             op.update(coding_provider="claude", coding_model=self.config.get("claude", {}).get("model"),
                       coding_reasoning_effort=self.config.get("claude", {}).get("reasoning_effort"),
@@ -830,11 +835,42 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         state.setdefault("provider_output_failures", []).append(str(audit))
         state["operation"] = None
 
+    def _review_resume_source(self, state, operation, work):
+        from .ue_checks import _safe_under
+        if (self.config.get("codex", {}).get("review_transport") != "responses_api" or
+                state["phase"] not in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"} or
+                operation.get("kind") != "review" or
+                operation.get("task_id") != (state.get("task") or {}).get("id")):
+            return None
+        candidates = [operation["output_dir"]]
+        if operation.get("resume_from") is not None:
+            if operation["resume_from"] == operation["output_dir"]:
+                raise RuntimeError("API review continuation cannot reference its own operation.")
+            candidates.append(operation["resume_from"])
+        runtime = self.runtime.resolve()
+        for raw in candidates:
+            if not isinstance(raw, str) or not Path(raw).is_absolute():
+                raise RuntimeError("API review continuation source must be an absolute managed run.")
+            source = Path(raw)
+            if source.parent != runtime / "runs" or not re.fullmatch(r"review-[a-f0-9]{32}", source.name):
+                raise RuntimeError("API review continuation source escaped its managed runs.")
+            source = _safe_under(runtime, Path("runs") / source.name)
+            record = _responses_api_receipt(source)
+            if (record is not None and record.get("kind") == "review" and record.get("status") == "failed"
+                    and type(record.get("exit_code")) is int and record["exit_code"] != 0
+                    and record.get("transient") is True and record.get("output_limit_exceeded") is False
+                    and record.get("head_sha") == operation["head_sha"]
+                    and record.get("workspace") == str(Path(work).resolve())
+                    and type(record.get("turns")) is list and record["turns"]):
+                return source
+        return None
+
     def _invoke(self, state, kind, prompt, work, *, providers=None):
         providers = self.providers if providers is None else providers
         self._validate_operation_task(state)
         if kind == "code":
             self._claim_session(state["task"], state["task"].get("session_id"))
+        resume_from = None
         op = state["operation"]
         if op is not None:
             if op["kind"] != kind:
@@ -861,13 +897,16 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 if session:
                     self._claim_session(state["task"], session)
                 state["task"]["code_resume"] = True
+            if kind == "review" and callable(getattr(providers, "resume_review", None)):
+                resume_from = self._review_resume_source(state, op, work)
             # The old invocation is never replayed into the same log directory.
             state["operation"] = None
             if state.get("provider_retry"):
                 state["provider_retry"].update(status="retrying", operation_output_dir=None)
                 state["last_error"] = None
-            self._save(state)
-        op = self._new_operation(state, kind)
+            if resume_from is None:
+                self._save(state)
+        op = self._new_operation(state, kind, resume_from=resume_from)
         maximum = min(900, self.config["step_timeout_seconds"]) if kind == "art_diagnose" else self.config["step_timeout_seconds"]
         if kind == "code" and (state.get("task") or {}).get("kind") != "art":
             maximum = self.config.get("code_timeout_seconds", maximum)
@@ -875,6 +914,9 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         op["window_limited"] = window_limited
         op["timeout_seconds"] = timeout
         self._save(state)
+        if kind == "review" and op.get("resume_from") and callable(getattr(providers, "resume_review", None)):
+            return providers.resume_review(prompt, work, Path(op["output_dir"]), timeout,
+                                           previous_out=Path(op["resume_from"]))
         if kind == "code":
             requested_session = state["task"].get("session_id")
             result = providers.code(prompt, work, Path(op["output_dir"]), timeout,

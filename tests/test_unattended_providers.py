@@ -165,6 +165,21 @@ class ProviderTests(unittest.TestCase):
         classify.assert_called_once_with(out)
         route.assert_not_called()
 
+    @patch("unattended.providers._codex_art_review_directory", return_value=None)
+    @patch("unattended.api_review.review", return_value=REVIEW)
+    def test_direct_api_continuation_passes_original_source_to_a_fresh_attempt(self, review, evidence):
+        self.providers.config["codex"].update(review_transport="responses_api", model="gpt-6-astra",
+                                               review_instructions="Keep the fixed acceptance criteria.")
+        previous, out = self.root / "previous", self.root / "continued"
+        self.assertEqual(self.providers.resume_review("Review", self.root, out, 30, previous_out=previous), REVIEW)
+        review.assert_called_once_with(self.providers.config, "Review\nKeep the fixed acceptance criteria.",
+                                       self.root, out, 30, art_directory=None, resume_from=previous)
+        with self.assertRaisesRegex(ProviderError, "fresh invocation"):
+            self.providers.resume_review("Review", self.root, previous, 30, previous_out=previous)
+        self.providers.config["codex"]["review_transport"] = "codex"
+        with self.assertRaisesRegex(ProviderError, "Responses API transport"):
+            self.providers.resume_review("Review", self.root, out, 30, previous_out=previous)
+
     @patch("unattended.providers.run_process")
     def test_local_secrets_are_only_passed_to_the_matching_provider(self, process):
         self.providers.config["config_path"] = str(self.root / "unattended.local.json")

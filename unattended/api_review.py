@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import hashlib
+import http.client
 import json
 import math
 from pathlib import Path
@@ -17,6 +18,7 @@ from .providers import REVIEW_SCHEMA, ProviderError, _atomic_json, _codex_api_ke
 from .review_evidence import ReviewEvidence
 from .network import proxy_handler
 from .secrets import read_secret, validate_api_base_url
+from .storage import write_text
 
 
 PROTOCOL = "openai_responses_v1"
@@ -24,6 +26,8 @@ MAX_TOOL_CALLS = 96
 MAX_ROUNDS = MAX_TOOL_CALLS + 1
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
+REQUEST_ATTEMPTS = 4
+REQUEST_BACKOFF = (1, 2, 4)
 _RESPONSE_ID = re.compile(r"resp_[A-Za-z0-9_-]{1,200}\Z")
 _HEAD = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _PERMANENT_CODES = {
@@ -40,9 +44,10 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class _RequestFailure(Exception):
-    def __init__(self, *, status=None, code=None, reason=None, retry_after=None, timed_out=False):
+    def __init__(self, *, status=None, code=None, reason=None, retry_after=None, timed_out=False, transport=None):
         self.status, self.code, self.reason = status, code, reason
         self.retry_after, self.timed_out = retry_after, timed_out
+        self.transport = transport or {}
 
 
 class _OutputLimit(ProviderError):
@@ -124,7 +129,7 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
             candidate = body.get("error", {}).get("code")
             if isinstance(candidate, str) and re.fullmatch(r"[a-z_]{1,80}", candidate):
                 code = candidate
-        except (OSError, ValueError, AttributeError, UnicodeError, RecursionError):
+        except (OSError, ValueError, AttributeError, UnicodeError, RecursionError, http.client.HTTPException):
             pass
         finally:
             error.close()
@@ -132,12 +137,46 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
         if code not in _PERMANENT_CODES:
             reason = "rate_limited" if error.code == 429 else "server_unavailable" if 500 <= error.code <= 599 else None
         raise _RequestFailure(status=error.code, code=code, reason=reason,
-                              retry_after=_retry_after(error.headers.get("Retry-After"))) from None
-    except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError) as error:
+                              retry_after=_retry_after((error.headers or {}).get("Retry-After"))) from None
+    except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, http.client.HTTPException) as error:
         cause = getattr(error, "reason", error)
-        raise _RequestFailure(reason="transport", timed_out=isinstance(cause, (TimeoutError, socket.timeout))) from None
+        transport = {"exception_type": type(error).__name__, "cause_type": type(cause).__name__}
+        for source, target in (("errno", "errno"), ("verify_code", "ssl_verify_code")):
+            value = getattr(cause, source, None)
+            if type(value) is int:
+                transport[target] = value
+        for source, target in (("reason", "ssl_reason"), ("library", "ssl_library")):
+            value = getattr(cause, source, None)
+            if isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", value):
+                transport[target] = value
+        raise _RequestFailure(reason="transport", timed_out=isinstance(cause, (TimeoutError, socket.timeout)),
+                              transport=transport) from None
     except (ValueError, UnicodeError, RecursionError):
         raise ProviderError("API review returned invalid JSON") from None
+
+
+def _request(payload, key, endpoint, proxy, deadline, receipt, out, number):
+    """Retry an unchanged read-only review request before abandoning its transcript."""
+    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            receipt["timed_out"] = True
+            raise ProviderError("API review exhausted its time budget", interrupted=True)
+        try:
+            return _post(payload, key, endpoint, remaining, proxy=proxy)
+        except _RequestFailure as error:
+            row = {"round": number, "attempt": attempt, "request_sha256": _hash(payload),
+                   "http_status": error.status, "api_error_code": error.code, "retry_reason": error.reason,
+                   "transport_exception": error.transport, "at": _now()}
+            failures = receipt.setdefault("request_failures", [])
+            failures.append(row)
+            del failures[:-128]
+            _save(out / "process.json", receipt)
+            delay = max(REQUEST_BACKOFF[min(attempt - 1, len(REQUEST_BACKOFF) - 1)], error.retry_after or 0)
+            if (not error.reason or error.code in _PERMANENT_CODES or attempt == REQUEST_ATTEMPTS or
+                    delay > 30 or time.monotonic() + delay >= deadline):
+                raise
+            time.sleep(delay)
 
 
 def _output(response):
@@ -192,7 +231,130 @@ def _inspected(tools, *, requires_image=False):
     return {"git_diff", "read_file"} <= successful and (not requires_image or "read_image" in successful)
 
 
-def review(config, prompt, cwd, out, timeout, *, art_directory=None):
+def _request_body(model, settings, instructions, transcript, definitions, number):
+    body = {"model": model, "store": False, "stream": False,
+            "instructions": instructions, "input": transcript, "tools": definitions,
+            "tool_choice": "required" if number == 1 else "auto", "parallel_tool_calls": False,
+            "include": ["reasoning.encrypted_content"], "max_output_tokens": 32768,
+            "text": {"format": {"type": "json_schema", "name": "task_review",
+                                 "schema": REVIEW_SCHEMA, "strict": True}}}
+    if settings.get("reasoning_effort"):
+        body["reasoning"] = {"effort": settings["reasoning_effort"]}
+    return body
+
+
+def _tool_result(call, evidence, secrets):
+    arguments = None
+    try:
+        arguments = _strict_json(call.get("arguments", ""))
+        if type(arguments) is not dict:
+            raise ValueError
+        evidence.verify()
+        value = evidence.run(call["name"], arguments)
+        if type(value) is not dict:
+            raise ValueError
+        value = _redact(value, secrets)
+        success = "error" not in value
+    except (ValueError, TypeError, OSError):
+        value, success = {"error": "Evidence tool request was rejected or unavailable"}, False
+    image_url = value.get("image_url")
+    if image_url is not None:
+        if not isinstance(image_url, str) or not image_url.startswith("data:image/"):
+            raise ProviderError("API review image evidence has an invalid format")
+        value = {field: item for field, item in value.items() if field != "image_url"}
+        value.update(image_attached=True, image_sha256=_hash(image_url.encode("utf-8")))
+    row = {"call_id": call["call_id"], "name": call["name"], "arguments": _redact(arguments, secrets),
+           "success": success, "output": value}
+    return row, image_url
+
+
+def _append_tool(transcript, row, image_url):
+    transcript.append({"type": "function_call_output", "call_id": row["call_id"],
+                       "output": _bytes(row["output"]).decode("utf-8")})
+    if image_url is not None:
+        transcript.append({"role": "user", "content": [
+            {"type": "input_text", "text": "Read-only image evidence returned by " + row["call_id"]},
+            {"type": "input_image", "image_url": image_url, "detail": "high"}]})
+
+
+def _resume(source, out, initial, receipt, evidence, settings, secrets, deadline):
+    source = Path(source).resolve()
+    if source == out or classify_failure(source) is None:
+        raise ValueError("API review resume source is not a failed transient attempt")
+    previous, process_hash = _read(source / "process.json", 1024 * 1024)
+    seed, seed_hash = _read(source / "request.json", MAX_TRANSCRIPT_BYTES)
+    schema, _ = _read(source / "schema.json")
+    fields = ("head_sha", "model", "reasoning_effort", "requires_image", "workspace")
+    if (seed != initial or schema != REVIEW_SCHEMA or
+            any(previous.get(field) != receipt.get(field) for field in fields)):
+        raise ValueError("API review resume context differs from the current review")
+    turns = previous.get("turns")
+    if type(turns) is not list or len(turns) >= MAX_ROUNDS:
+        raise ValueError("API review resume source has an invalid round manifest")
+    transcript = list(initial["input"])
+    tools, response_ids, call_ids, files = [], set(), set(), []
+    total = (source / "request.json").stat().st_size
+    for number, turn in enumerate(turns, 1):
+        evidence.verify()
+        response_file = f"responses/turn-{number:04d}.json"
+        tools_file = f"responses/turn-{number:04d}.tools.json"
+        if (type(turn) is not dict or turn.get("number") != number or turn.get("response_file") != response_file or
+                turn.get("tools_file") != tools_file):
+            raise ValueError("API review resume source contains an incomplete round")
+        response, response_hash = _read(source / response_file)
+        rows, tools_hash = _read(source / tools_file)
+        output = _output(response)
+        body = _request_body(receipt["model"], settings, initial["instructions"], transcript, evidence.tools, number)
+        if (response_hash != turn.get("response_sha256") or tools_hash != turn.get("tools_sha256") or
+                turn.get("request_sha256") != _hash(_bytes(body)) or response["id"] != turn.get("response_id") or
+                response["id"] in response_ids or not _model_matches(response, receipt["model"]) or
+                turn.get("model_verified") is not True or turn.get("observed_model") != response["model"] or
+                not isinstance(turn.get("wire_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", turn["wire_sha256"])):
+            raise ValueError("API review resume response or request hash is invalid")
+        calls = [item for item in output if item["type"] == "function_call"]
+        if not calls or type(rows) is not list or len(rows) != len(calls) or len(tools) + len(calls) > MAX_TOOL_CALLS:
+            raise ValueError("API review resume source contains an invalid tool round")
+        transcript.extend(output)
+        for call, expected in zip(calls, rows):
+            if deadline <= time.monotonic():
+                raise ProviderError("API review exhausted its time budget during checkpoint verification", interrupted=True)
+            ident, name = call.get("call_id"), call.get("name")
+            if (not isinstance(ident, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", ident) or
+                    ident in call_ids or not isinstance(name, str)):
+                raise ValueError("API review resume tool identity is invalid")
+            evidence.verify()
+            actual, image_url = _tool_result(call, evidence, secrets)
+            if _bytes(actual) != _bytes(expected):
+                raise ValueError("API review resume evidence changed since it was inspected")
+            tools.append(actual)
+            call_ids.add(ident)
+            _append_tool(transcript, actual, image_url)
+        response_ids.add(response["id"])
+        files.extend([(response_file, response_hash), (tools_file, tools_hash)])
+        total += (source / response_file).stat().st_size + (source / tools_file).stat().st_size
+        if total > MAX_TRANSCRIPT_BYTES:
+            raise _OutputLimit("API review resume source exceeded its transcript limit")
+    evidence.verify()
+    if _read(source / "process.json", 1024 * 1024)[1] != process_hash:
+        raise ValueError("API review resume source changed during verification")
+    for relative, digest in files:
+        path = source / relative
+        with path.open("rb") as stream:
+            raw = stream.read(MAX_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_RESPONSE_BYTES or _hash(raw) != digest:
+            raise ValueError("API review resume artifact changed before copying")
+        write_text(out / relative, raw.decode("utf-8"))
+        if _hash((out / relative).read_bytes()) != digest:
+            raise ValueError("API review resume artifact copy is inconsistent")
+    if (_read(source / "process.json", 1024 * 1024)[1] != process_hash or
+            _read(source / "request.json", MAX_TRANSCRIPT_BYTES)[1] != seed_hash):
+        raise ValueError("API review resume source changed while its artifacts were copied")
+    receipt.update(turns=turns, resume_from=str(source), resumed_rounds=len(turns),
+                   resume_source_sha256=process_hash, resume_request_sha256=seed_hash)
+    return transcript, tools, total
+
+
+def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from: Path | None = None):
     if not isinstance(prompt, str) or not prompt.strip():
         raise ProviderError("A nonempty API review prompt is required")
     if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0:
@@ -246,25 +408,21 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
     _, stored = _save(out / "request.json", initial, limit=MAX_TRANSCRIPT_BYTES)
     _save(out / "process.json", receipt)
     try:
-        for number in range(1, MAX_ROUNDS + 1):
+        if resume_from is not None:
+            transcript, tools, stored = _resume(resume_from, out, initial, receipt, evidence, settings, secrets, deadline)
+            _save(out / "process.json", receipt)
+        for number in range(len(receipt["turns"]) + 1, MAX_ROUNDS + 1):
             evidence.verify()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 receipt["timed_out"] = True
                 raise ProviderError("API review exhausted its time budget", interrupted=True)
-            request = {"model": model, "store": False, "stream": False,
-                       "instructions": instructions, "input": transcript, "tools": evidence.tools,
-                       "tool_choice": "required" if number == 1 else "auto", "parallel_tool_calls": False,
-                       "include": ["reasoning.encrypted_content"], "max_output_tokens": 32768,
-                       "text": {"format": {"type": "json_schema", "name": "task_review",
-                                            "schema": REVIEW_SCHEMA, "strict": True}}}
-            if settings.get("reasoning_effort"):
-                request["reasoning"] = {"effort": settings["reasoning_effort"]}
+            request = _request_body(model, settings, instructions, transcript, evidence.tools, number)
             payload = _bytes(request)
             if len(payload) > MAX_TRANSCRIPT_BYTES:
                 receipt["output_limit_exceeded"] = True
                 raise ProviderError("API review request exceeded its transcript limit")
-            response, wire_hash = _post(payload, key, base + "/responses", remaining, proxy=proxy)
+            response, wire_hash = _request(payload, key, base + "/responses", proxy, deadline, receipt, out, number)
             response = _redact(response, secrets, protocol=True)
             response_path = out / "responses" / f"turn-{number:04d}.json"
             response_hash, size = _save(response_path, response)
@@ -315,35 +473,10 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
                 if (not isinstance(call_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", call_id) or
                         any(row["call_id"] == call_id for row in tools) or not isinstance(name, str)):
                     raise ProviderError("API review returned an invalid tool-call identity")
-                arguments = None
-                try:
-                    arguments = _strict_json(call.get("arguments", ""))
-                    if type(arguments) is not dict:
-                        raise ValueError
-                    evidence.verify()
-                    value = evidence.run(name, arguments)
-                    if type(value) is not dict:
-                        raise ValueError
-                    value = _redact(value, secrets)
-                    success = "error" not in value
-                except (ValueError, TypeError, OSError):
-                    value, success = {"error": "Evidence tool request was rejected or unavailable"}, False
-                image_url = value.get("image_url")
-                if image_url is not None:
-                    if not isinstance(image_url, str) or not image_url.startswith("data:image/"):
-                        raise ProviderError("API review image evidence has an invalid format")
-                    value = {field: item for field, item in value.items() if field != "image_url"}
-                    value.update(image_attached=True, image_sha256=_hash(image_url.encode("utf-8")))
-                row = {"call_id": call_id, "name": name, "arguments": _redact(arguments, secrets),
-                       "success": success, "output": value}
+                row, image_url = _tool_result(call, evidence, secrets)
                 tools.append(row)
                 turn_tools.append(row)
-                transcript.append({"type": "function_call_output", "call_id": call_id,
-                                   "output": _bytes(value).decode("utf-8")})
-                if image_url is not None:
-                    transcript.append({"role": "user", "content": [
-                        {"type": "input_text", "text": "Read-only image evidence returned by " + call_id},
-                        {"type": "input_image", "image_url": image_url, "detail": "high"}]})
+                _append_tool(transcript, row, image_url)
             tools_path = out / "responses" / f"turn-{number:04d}.tools.json"
             tools_hash, size = _save(tools_path, turn_tools)
             stored += size
@@ -356,6 +489,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
     except _RequestFailure as error:
         receipt.update(status="failed", exit_code=1, finished_at=_now(), transient=error.reason is not None,
                        timed_out=error.timed_out, http_status=error.status, api_error_code=error.code)
+        if error.transport:
+            receipt["transport_exception"] = error.transport
         if error.reason:
             receipt["retry_reason"] = error.reason
         if error.retry_after is not None and error.reason:
@@ -367,6 +502,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
     except (OSError, ValueError, TypeError, KeyError, RecursionError, ProviderError) as error:
         if isinstance(error, _OutputLimit):
             receipt["output_limit_exceeded"] = True
+        if isinstance(error, ProviderError) and error.interrupted:
+            receipt["timed_out"] = True
         receipt.update(status="failed", exit_code=1, finished_at=_now(), failure_type=type(error).__name__)
         _save(out / "process.json", receipt)
         if isinstance(error, ProviderError):

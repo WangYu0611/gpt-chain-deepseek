@@ -1,5 +1,6 @@
 """The HTTP reviewer binds actual evidence and validates restart-safe API receipts."""
 from io import BytesIO
+import http.client
 import json
 from pathlib import Path
 import tempfile
@@ -61,8 +62,9 @@ class ApiReviewTests(unittest.TestCase):
         patch.object(api, "_codex_api_key", return_value="private-api-credential").start()
         patch.object(api, "read_secret", return_value=None).start()
         patch("unattended.secrets.secret_values", return_value=["private-backup-credential"]).start()
+        patch.object(api, "REQUEST_ATTEMPTS", 1).start()
 
-    def invoke(self, responses, prompt="Inspect this task", *, art_directory=None):
+    def invoke(self, responses, prompt="Inspect this task", *, art_directory=None, resume_from=None):
         def post(payload, key, endpoint, timeout, **kwargs):
             self.requests.append((json.loads(payload), key, endpoint, timeout))
             item = responses.pop(0)
@@ -70,7 +72,7 @@ class ApiReviewTests(unittest.TestCase):
                 raise item
             return item, api._hash(api._bytes(item))
         with patch.object(api, "_post", side_effect=post):
-            return api.review(self.config, prompt, self.root, self.out, 30, art_directory=art_directory)
+            return api.review(self.config, prompt, self.root, self.out, 30, art_directory=art_directory, resume_from=resume_from)
 
     def exchange(self, final=None):
         return [response(1, [call("git_diff", "call_diff"), call("read_file", "call_file")]),
@@ -210,7 +212,7 @@ class ApiReviewTests(unittest.TestCase):
         self.assertIsNone(api.recover(self.out))
 
     def test_deadline_after_http_response_preserves_failed_receipt_without_acceptance(self):
-        with patch.object(api.time, "monotonic", side_effect=[100, 100, 131]), self.assertRaises(ProviderError) as caught:
+        with patch.object(api.time, "monotonic", side_effect=[100, 100, 100, 131]), self.assertRaises(ProviderError) as caught:
             self.invoke(self.exchange())
         self.assertTrue(caught.exception.interrupted)
         receipt = json.loads((self.out / "process.json").read_text())
@@ -235,6 +237,145 @@ class ApiReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "evidence or local receipt"):
             self.invoke(self.exchange())
         self.assertIsNone(api.recover(self.out))
+
+    def checkpoint(self, *, image=False):
+        first = self.exchange()[0]
+        if image:
+            first["output"].append(call("read_image", "call_image"))
+        with self.assertRaises(ProviderError):
+            self.invoke([first, api._RequestFailure(reason="transport")])
+        return self.out
+
+    def test_transient_request_retries_use_identical_payload_and_execute_tools_once(self):
+        replies = self.exchange()
+        sequence = [api._RequestFailure(reason="transport", transport={"exception_type": "URLError", "cause_type": "SSLError"}),
+                    replies[0], api._RequestFailure(status=503, reason="server_unavailable"), replies[1]]
+        with patch.object(api, "REQUEST_ATTEMPTS", 4), patch.object(api.time, "sleep") as sleep:
+            self.assertEqual(self.invoke(sequence), RESULT)
+        self.assertEqual(self.requests[0][0], self.requests[1][0])
+        self.assertEqual(self.requests[2][0], self.requests[3][0])
+        self.assertEqual(len(self.evidence.calls), 2)
+        self.assertEqual([row.args[0] for row in sleep.call_args_list], [1, 1])
+        receipt = json.loads((self.out / "process.json").read_text())
+        self.assertEqual(len(receipt["request_failures"]), 2)
+        self.assertEqual(receipt["request_failures"][0]["transport_exception"]["cause_type"], "SSLError")
+        self.assertEqual(api.recover(self.out), RESULT)
+
+    def test_retries_are_bounded_and_auth_credit_or_long_retry_after_do_not_sleep(self):
+        with patch.object(api, "REQUEST_ATTEMPTS", 3), patch.object(api.time, "sleep") as sleep:
+            with self.assertRaises(ProviderError):
+                self.invoke([api._RequestFailure(reason="transport") for _ in range(3)])
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual([row.args[0] for row in sleep.call_args_list], [1, 2])
+        for label, failure in (("auth", api._RequestFailure(status=401, code="invalid_api_key")),
+                               ("quota", api._RequestFailure(status=429, code="insufficient_quota")),
+                               ("long-delay", api._RequestFailure(status=429, reason="rate_limited", retry_after=60))):
+            self.out = self.root / label
+            before = len(self.requests)
+            with patch.object(api, "REQUEST_ATTEMPTS", 4), patch.object(api.time, "sleep") as sleep:
+                with self.subTest(label=label), self.assertRaises(ProviderError):
+                    self.invoke([failure])
+            self.assertEqual(len(self.requests), before + 1)
+            sleep.assert_not_called()
+
+    def test_resume_revalidates_and_copies_completed_turns_without_changing_source(self):
+        source = self.checkpoint()
+        originals = {path.relative_to(source).as_posix(): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+        pending_payload = self.requests[-1][0]
+        self.out = self.root / "continued"
+        self.assertEqual(self.invoke([response(2, [answer()])], resume_from=source), RESULT)
+        self.assertEqual(self.requests[-1][0], pending_payload)
+        self.assertEqual(len(self.evidence.calls), 4)
+        receipt = json.loads((self.out / "process.json").read_text())
+        self.assertEqual(receipt["resumed_rounds"], 1)
+        self.assertEqual(receipt["resume_from"], str(source.resolve()))
+        self.assertEqual(receipt["resume_request_sha256"], api._hash(originals["request.json"]))
+        self.assertEqual((self.out / "responses/turn-0001.json").read_bytes(), originals["responses/turn-0001.json"])
+        for relative, raw in originals.items():
+            self.assertEqual((source / relative).read_bytes(), raw)
+        self.assertEqual(api.recover(self.out), RESULT)
+
+    def test_resume_refuses_corrupt_response_tools_context_and_changed_evidence_before_http(self):
+        source = self.checkpoint()
+        for relative in ("responses/turn-0001.json", "responses/turn-0001.tools.json", "request.json"):
+            path = source / relative
+            original = path.read_bytes()
+            if relative == "request.json":
+                value = json.loads(original)
+                value["instructions"] = "Changed instructions"
+                path.write_text(json.dumps(value))
+            else:
+                path.write_bytes(original + b" ")
+            self.out = self.root / ("invalid-" + path.name)
+            before = len(self.requests)
+            with self.subTest(relative=relative), self.assertRaises(ProviderError):
+                self.invoke([], resume_from=source)
+            self.assertEqual(len(self.requests), before)
+            path.write_bytes(original)
+        self.out = self.root / "changed-evidence"
+        self.evidence.run = lambda *args: {"content": "Changed evidence"}
+        before = len(self.requests)
+        with self.assertRaises(ProviderError):
+            self.invoke([], resume_from=source)
+        self.assertEqual(len(self.requests), before)
+
+    def test_resume_recreates_image_input_and_rejects_changed_image_bytes(self):
+        def read(name, arguments):
+            return {"image_url": "data:image/png;base64,aGVsbG8=", "path": "preview.png"} if name == "read_image" else {"content": "source"}
+        self.evidence.run = read
+        source = self.checkpoint(image=True)
+        pending_payload = self.requests[-1][0]
+        self.out = self.root / "image-continued"
+        self.assertEqual(self.invoke([response(2, [answer()])], resume_from=source), RESULT)
+        self.assertEqual(self.requests[-1][0], pending_payload)
+        self.out = self.root / "changed-image"
+        self.evidence.run = lambda name, arguments: ({"image_url": "data:image/png;base64,Y2hhbmdlZA==", "path": "preview.png"}
+                                                     if name == "read_image" else {"content": "source"})
+        before = len(self.requests)
+        with self.assertRaises(ProviderError):
+            self.invoke([], resume_from=source)
+        self.assertEqual(len(self.requests), before)
+
+    def test_resume_preserves_total_round_budget(self):
+        source = self.checkpoint()
+        self.out = self.root / "budget"
+        before = len(self.requests)
+        with patch.object(api, "MAX_ROUNDS", 2), self.assertRaisesRegex(ProviderError, "round limit"):
+            self.invoke([response(2, [call("read_file", "more")])], resume_from=source)
+        self.assertEqual(len(self.requests), before + 1)
+
+    def test_another_transient_failure_after_resume_retains_all_verified_progress_for_the_next_attempt(self):
+        first = self.checkpoint()
+        self.out = self.root / "second-attempt"
+        with self.assertRaises(ProviderError):
+            self.invoke([response(2, [call("read_file", "call_more")]), api._RequestFailure(reason="transport")],
+                        resume_from=first)
+        second = self.out
+        self.assertEqual(len(json.loads((second / "process.json").read_text())["turns"]), 2)
+        pending_payload = self.requests[-1][0]
+        self.out = self.root / "third-attempt"
+        self.assertEqual(self.invoke([response(3, [answer()])], resume_from=second), RESULT)
+        self.assertEqual(self.requests[-1][0], pending_payload)
+        receipt = json.loads((self.out / "process.json").read_text())
+        self.assertEqual(receipt["resumed_rounds"], 2)
+        self.assertEqual([turn["number"] for turn in receipt["turns"]], [1, 2, 3])
+        self.assertEqual(api.recover(self.out), RESULT)
+
+    def test_short_retry_after_is_honored_before_repeating_the_same_request(self):
+        replies = self.exchange()
+        with patch.object(api, "REQUEST_ATTEMPTS", 4), patch.object(api.time, "sleep") as sleep:
+            self.assertEqual(self.invoke([api._RequestFailure(status=429, reason="rate_limited", retry_after=3), *replies]), RESULT)
+        sleep.assert_called_once_with(3)
+        self.assertEqual(self.requests[0][0], self.requests[1][0])
+
+    def test_truncated_http_diagnostics_record_types_without_raw_partial_body(self):
+        with patch.object(api, "build_opener") as build:
+            build.return_value.open.side_effect = http.client.IncompleteRead(b"private-api-credential", 500)
+            with self.assertRaises(api._RequestFailure) as caught:
+                api._post(b"{}", "private-api-credential", "https://api.openai.com/v1/responses", 10)
+        self.assertEqual(caught.exception.reason, "transport")
+        self.assertEqual(caught.exception.transport, {"exception_type": "IncompleteRead", "cause_type": "IncompleteRead"})
+        self.assertNotIn("private-api-credential", json.dumps(caught.exception.transport))
 
     def test_transport_uses_bearer_header_and_classifies_http_errors_without_error_text(self):
         payload = b'{"model":"test"}'

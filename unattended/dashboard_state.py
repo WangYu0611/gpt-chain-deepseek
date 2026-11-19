@@ -326,6 +326,40 @@ def _codex_route(runtime, directory, kind):
     return "api_key", directory
 
 
+def _api_review_progress(runtime, directory, operation):
+    """Project fixed receipt counters for the currently owned API review."""
+    try:
+        path = _confined(runtime, directory / "process.json")
+        receipt = _object(path, missing={}, maximum=1024 * 1024)
+        status = receipt.get("status")
+        running = status == "running" and receipt.get("exit_code") is None
+        finished = status in {"completed", "failed"} and type(receipt.get("exit_code")) is int
+        if (receipt.get("protocol") != "openai_responses_v1" or receipt.get("kind") != "review"
+                or not (running or finished)
+                or operation.get("head_sha") is not None and receipt.get("head_sha") != operation["head_sha"]):
+            return None
+        turns = receipt.get("turns", [])
+        if not isinstance(turns, list) or len(turns) > 97:
+            return None
+        completed = 0
+        for number, turn in enumerate(turns, 1):
+            if (not isinstance(turn, dict) or type(turn.get("number")) is not int or turn["number"] != number
+                    or not isinstance(turn.get("response_id"), str)
+                    or not re.fullmatch(r"resp_[A-Za-z0-9_-]{1,200}", turn["response_id"])
+                    or not isinstance(turn.get("response_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", turn["response_sha256"])
+                    or turn.get("response_file") != f"responses/turn-{number:04d}.json"):
+                break
+            completed += 1
+        resumed = receipt.get("resumed_rounds", 0)
+        if type(resumed) is not int or not 0 <= resumed <= completed:
+            resumed = 0
+        return {"completed_response_rounds": completed, "resumed_rounds": resumed, "api_status": status,
+                "last_receipt_time": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
+    except (OSError, ValueError, RuntimeError, TypeError, RecursionError):
+        return None
+
+
 def _attempt_finished_at(runtime, directory, operation, check_id, started_at, updated_at):
     """Use the receipt from the operation shown in the activity panel."""
     if directory is None or started_at is None:
@@ -566,6 +600,7 @@ def _empty(now):
             "planning_provider": "codex",
             "models": {role: {"name": name, "model": None, "effort": None} for role, name in (("codex", "Codex"), ("dsh", "DSH"))},
             "codex_auth": {"policy": None, "current": None, "fallback": False},
+            "api_review": None,
             "check_progress": {"total": 0, "current_id": None},
             "task": None, "checks": [], "accepted": [], "deferred": [], "activity": [], "burst": None, "provider_retry": None,
             "publication": {"mode": None, "milestone_id": None, "pending_tasks": 0, "summary": ""},
@@ -1622,7 +1657,19 @@ def collect_snapshot(config_path: Path) -> dict:
                        if matches_operation
                        else None)
         activity_actor = _CODING_NAMES[operation.get("coding_provider", "dsh")] if kind == "code" else actor
-        snapshot["activity"], last_log = _activity(runtime, directory, kind, activity_actor, check_id)
+        progress = (_api_review_progress(runtime, directory, operation)
+                    if directory and matches_operation and kind == "review"
+                    and snapshot["codex_auth"]["current"] == "responses_api" else None)
+        snapshot["api_review"] = progress
+        if progress:
+            suffix = {"running": "等待当前请求回执", "completed": "本次审核已结束", "failed": "本次审核未完成，等待重试"}[progress["api_status"]]
+            text = f"已完成 {progress['completed_response_rounds']} 轮审核 · " + suffix
+            if progress["resumed_rounds"]:
+                text += f"（续接 {progress['resumed_rounds']} 轮）"
+            last_log = progress["last_receipt_time"]
+            snapshot["activity"] = [{"at": last_log, "actor": "OpenAI API", "kind": "review", "text": text}]
+        else:
+            snapshot["activity"], last_log = _activity(runtime, directory, kind, activity_actor, check_id)
         activity_at = last_log or _iso(state.get("updated_at"))
         clock_running = (matches_operation and phase not in {"BLOCKED", "DONE"}
                          and snapshot["worker"]["alive"] and snapshot["worker"]["healthy"])

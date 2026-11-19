@@ -1,14 +1,16 @@
 """Scheduling and failure gates must hold before any agent is started."""
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import tempfile
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from unattended.calendar import BEIJING
 from unattended.engine import Engine
+from unattended.providers import ProviderError
 from unattended.storage import read_json, write_json
 
 
@@ -103,6 +105,95 @@ class EngineGateTests(unittest.TestCase):
         self.engine.step()
         self.assertEqual(self.providers.plan.call_count, 3)
         self.assertEqual(self.engine.retry()["phase"], "PLAN")
+
+    def failed_api_review(self):
+        self.config["codex"].update(review_transport="responses_api", model="gpt-6-astra")
+        state = self.engine._load()
+        state.update(phase="REVIEW", expected_head="a" * 40,
+                     task={"id": "TASK-TEST-0001", "candidate": {"head_sha": "a" * 40},
+                           "reworks": 0, "check_results": [{"passed": True}]})
+        operation = self.engine._new_operation(state, "review")
+        source = Path(operation["output_dir"])
+        write_json(source / "process.json", {
+            "protocol": "openai_responses_v1", "kind": "review", "status": "failed", "exit_code": 1,
+            "transient": True, "retry_reason": "transport", "timed_out": False, "output_limit_exceeded": False,
+            "head_sha": "a" * 40, "workspace": str((self.engine.runtime / "workspace").resolve()),
+            "turns": [{"number": 1, "tools_file": "responses/turn-0001.tools.json"}],
+        })
+        self.providers.recover.return_value = None
+        result = {"decision": "accepted", "summary": "Reviewed fixed candidate", "feedback": "", "head_sha": "a" * 40}
+        self.providers.review.return_value = result
+        self.providers.resume_review.return_value = result
+        error = ProviderError("Temporary transport failure", transient=True, retry_reason="transport")
+        self.engine._schedule_provider_retry(state, "REVIEW", error, self.engine.runtime / "workspace")
+        return source
+
+    def test_api_review_retry_waits_then_persists_continuation_before_launch_without_replaying_code(self):
+        source = self.failed_api_review()
+        before = (source / "process.json").read_bytes()
+        self.assertEqual(self.engine.step()["status"], "waiting_provider")
+        self.providers.resume_review.assert_not_called()
+        self.now += timedelta(seconds=181)
+        result = self.providers.resume_review.return_value
+        def resume(prompt, work, out, timeout, *, previous_out):
+            saved = read_json(self.engine.state_path)["operation"]
+            self.assertEqual(saved["resume_from"], str(source))
+            self.assertEqual(saved["output_dir"], str(out))
+            self.assertEqual(saved["task_id"], "TASK-TEST-0001")
+            self.assertEqual(saved["head_sha"], "a" * 40)
+            self.assertNotEqual(out, source)
+            self.assertEqual(previous_out, source)
+            return result
+        self.providers.resume_review.side_effect = resume
+        self.assertEqual(self.engine.step()["phase"], "PUBLISH")
+        self.assertEqual((source / "process.json").read_bytes(), before)
+        self.providers.review.assert_not_called()
+        self.providers.code.assert_not_called()
+        self.providers.plan.assert_not_called()
+
+    def test_api_review_continuation_source_survives_a_crash_before_the_next_request(self):
+        source = self.failed_api_review()
+        self.now += timedelta(seconds=181)
+        self.providers.resume_review.side_effect = SystemExit("Simulated supervisor crash")
+        with self.assertRaises(SystemExit):
+            self.engine.step()
+        interrupted = read_json(self.engine.state_path)["operation"]
+        self.assertEqual(interrupted["resume_from"], str(source))
+        self.providers.resume_review.side_effect = None
+        fresh = Engine(self.config, self.providers, now=lambda: self.now)
+        self.assertEqual(fresh.step()["phase"], "PUBLISH")
+        self.assertEqual(self.providers.resume_review.call_args.kwargs["previous_out"], source)
+        self.assertNotEqual(str(self.providers.resume_review.call_args.args[2]), interrupted["output_dir"])
+        self.providers.review.assert_not_called()
+
+    def test_api_review_continuation_rejects_an_external_source_without_calling_the_provider(self):
+        self.failed_api_review()
+        state = read_json(self.engine.state_path)
+        state.pop("provider_retry")
+        self.engine._new_operation(state, "review", resume_from=self.root / "outside-review")
+        result = self.engine.step()
+        self.assertEqual(result["failures"], 1)
+        self.assertIn("managed runs", result["last_error"])
+        self.providers.resume_review.assert_not_called()
+        self.providers.review.assert_not_called()
+
+    def test_api_review_with_a_different_source_head_starts_a_fresh_review(self):
+        source = self.failed_api_review()
+        receipt = read_json(source / "process.json")
+        receipt["head_sha"] = "b" * 40
+        write_json(source / "process.json", receipt)
+        self.now += timedelta(seconds=181)
+        self.assertEqual(self.engine.step()["phase"], "PUBLISH")
+        self.providers.resume_review.assert_not_called()
+        self.providers.review.assert_called_once()
+
+    def test_api_review_provider_without_continuation_capability_keeps_fresh_review_compatibility(self):
+        self.failed_api_review()
+        self.now += timedelta(seconds=181)
+        provider = SimpleNamespace(recover=Mock(return_value=None), review=Mock(return_value=self.providers.review.return_value))
+        engine = Engine(self.config, provider, now=lambda: self.now)
+        self.assertEqual(engine.step()["phase"], "PUBLISH")
+        provider.review.assert_called_once()
         self.assertEqual(read_json(self.engine.state_path)["sequence"], 1)
 
     def test_state_cannot_be_reused_for_a_changed_goal(self):
