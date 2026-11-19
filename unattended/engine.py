@@ -14,6 +14,7 @@ import uuid
 
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from .calendar import WorkCalendar
+from .config import ART_CODING_MODEL, claude_execution_model
 from . import gitops
 from .providers import AgentProviders, ProviderError, codex_result_directory, read_session, validate_output
 from .storage import is_windows_sharing_error, lock, read_json, write_json, write_text
@@ -133,7 +134,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         config_file = Path(settings["config_file"])
         request = {"id": task_id, "kind": "art", "title": title.strip(), "body": body.strip(),
                    "config_file": str(config_file), "config_sha256": hashlib.sha256(config_file.read_bytes()).hexdigest(),
-                   "artifacts_dir": settings["artifacts_dir"], "model": "claude-opus-5-5",
+                   "artifacts_dir": settings["artifacts_dir"], "model": claude_execution_model(self.config),
                    "reasoning_effort": "high", "status": "queued", "enqueued_at": self.now().isoformat()}
         with lock(self.runtime / "art-queue.lock"):
             queue = self.art_queue()
@@ -219,7 +220,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 if item:
                     selected = {"id": item["id"], "kind": "art", "title": item["title"], "body": item["body"],
                                 "art_request": deepcopy(item), "coding_provider": "claude",
-                                "coding_model": "claude-opus-5-5", "coding_reasoning_effort": "high",
+                                "coding_model": item.get("model", ART_CODING_MODEL), "coding_reasoning_effort": "high",
                                 "acceptance_criteria": ["独立资产检查通过", "Codex 技术审阅通过", "用户确认固定版本的美术验收包"],
                                 "reworks": 0, "session_id": None, "feedback": "", "code_resume": False, "check_results": []}
             if selected is not None:
@@ -229,7 +230,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 directory = self.runtime / "tasks" / selected["id"]
                 write_json(directory / "task.json", selected)
                 write_text(directory / "TASK.md", selected["id"] + " " + selected["title"] + "\n\n" + selected["body"] +
-                           "\n\n执行：Claude Opus 5.5 / high。资产生产不得更改主项目源码或提交。\n")
+                           f"\n\n执行：{selected['coding_model']} / high。资产生产不得更改主项目源码或提交。\n")
                 state.update(task=selected, phase="CODE", operation=None, failures=0, last_error=None)
                 entry = next(entry for entry in queue["requests"] if entry["id"] == selected["id"])
                 entry.update(status="active", dispatched_at=self.now().isoformat())
@@ -897,7 +898,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             coder = "Claude Code（CC）" if self.config.get("coding_provider") == "claude" else "DSH"
             prompt += (f"用户当前分工：Claude Code（CC）规划任务，{coder}负责编码和本地提交，Codex 负责独立任务验收和阶段验收。\n")
             if self.config["claude"].get("critical_plan_model"):
-                prompt += "用户规划分工：Sonnet 规划常规任务并判断实际改动范围；关键系统任务和阶段完成提案由 Opus 完成最终规划，编码使用 Sonnet。\n"
+                settings = self.config["claude"]
+                prompt += (f"用户规划分工：{settings['model']} 规划常规任务并判断实际改动范围；"
+                           f"关键系统任务和阶段完成提案由 {settings['critical_plan_model']} 完成最终规划，"
+                           f"编码使用 {settings['model']}。\n")
         elif self.config.get("coding_provider") == "claude":
             prompt += "用户当前分工：Codex 只发布任务书与独立验收，Claude Code（CC）负责编码和本地提交。\n"
         if self.config.get("coding_provider") == "claude":
@@ -973,10 +977,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             )
             if selection["planning_level"] == "critical":
                 prompt += (
-                    "本轮由 Opus 完成最终规划。下面的 Sonnet 候选任务是待核实的提案。"
+                    f"本轮由 {selection['planning_model']} 完成最终规划。下面的常规规划候选任务是待核实的提案。"
                     "请重新读取实际源码和证据，核对关键系统边界、兼容性与验收条件后发布最终任务书。"
                     "返回 planning_level=critical。阶段完成提案必须逐项核对系统完成条件，并列出保留的人工待办。\n"
-                    "Sonnet 候选提案：\n" + json.dumps(selection["critical_candidate"], ensure_ascii=False) + "\n"
+                    "常规规划候选提案：\n" + json.dumps(selection["critical_candidate"], ensure_ascii=False) + "\n"
                 )
         result = self._invoke(state, "plan", prompt, work)
         if gitops.head(work) != current or not gitops.clean(work):
@@ -1237,7 +1241,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         self._recover_art_recipe_commit(state, work)
         self._validate_art_task(task, work, allow_recipe_dirty=True)
         prompt = (
-            "你是统一无人值守开发系统中的美术资产制作执行者。本任务使用 Claude Opus 5.5、high 思考。\n"
+            f"你是统一无人值守开发系统中的美术资产制作执行者。本任务使用 {task['coding_model']}、high 思考。\n"
             "按照已确认的风格参考和本轮任务书，调用调度器追加的固定美术 preview 入口。"
             "具体制作方法和实现选择由你自主决定，维护方不代替你分析或造型。"
             "在用户已确认风格、范围、预算、工具与验收边界内，自主诊断问题、调整实现和重跑。"

@@ -454,7 +454,7 @@
   let selectedModule = '';
   function prettyModel(value){
     const name=str(value);
-    return {'claude-sonnet-5-5':'Sonnet 5.5','claude-opus-5-5':'Opus 5.5','gpt-6-astra':'GPT-6 Astra'}[name]||name;
+    return {'claude-sonnet-5-5':'Sonnet 5.5','claude-opus-5-5':'Opus 5.5','claude-fable-5-2':'Fable 5.2','gpt-6-astra':'GPT-6 Astra'}[name]||name;
   }
   function moduleModel(item){
     if(item.model)return prettyModel(item.model)+(item.effort?' · '+str(item.effort):'')+(item.model_source==='configured'?' · 配置':'');
@@ -756,7 +756,7 @@
     const accepted=snapshot.full_flow_test?.accepted_repair,panel=$('user-repair-panel'),detail=$('user-repair-detail');
     panel.hidden=!repair&&!error&&!accepted;
     if(!repair&&!error&&accepted){
-      text('user-repair-title','Opus 全流程修复');text('user-repair-status','验收通过');
+      text('user-repair-title',prettyModel(accepted.model)+' 全流程修复');text('user-repair-status','验收通过');
       text('user-repair-summary',Number.isInteger(accepted.total_checks)?'独立检查 '+accepted.passed_checks+' / '+accepted.total_checks+' 项通过，已完成独立验收。':'独立全流程检查和任务审核均已通过。');
       text('user-repair-model',prettyModel(accepted.model)+' · '+str(accepted.effort));text('user-repair-stage','验收时间 · '+dateTime(accepted.accepted_at));
       text('user-repair-scope',str(accepted.task_id)+' · 验收版本 '+shortSHA(accepted.head_sha));
@@ -785,7 +785,7 @@
     if(!item){$('full-flow-retest').hidden=true;$('full-flow-package-short').hidden=true;if(error){text('full-flow-status','记录待核实');text('full-flow-summary',error);for(const id of ['full-flow-model','full-flow-stage','full-flow-updated','full-flow-scope'])text(id,'—');$('full-flow-detail').disabled=true;}return;}
     const repairBasis=snapshot.task?.user_repair?.source_full_flow_run===item.id;
     const historical=!!(item.historical||repairBasis||item.accepted_repair);
-    $('full-flow-test').dataset.historical=String(historical);text('full-flow-title',repairBasis?'本批修复的历史测试依据':item.accepted_repair?'修复前的全流程测试':historical?'历史全流程测试':'Opus全流程测试');text('full-flow-status',item.accepted_repair?'修复前记录':item.status_label||item.status);text('full-flow-summary',item.summary||'本次测试按固定版本独立执行，主任务状态另行显示。');
+    $('full-flow-test').dataset.historical=String(historical);text('full-flow-title',repairBasis?'本批修复的历史测试依据':item.accepted_repair?'修复前的全流程测试':historical?'历史全流程测试':item.title||'Claude全流程测试');text('full-flow-status',item.accepted_repair?'修复前记录':item.status_label||item.status);text('full-flow-summary',item.summary||'本次测试按固定版本独立执行，主任务状态另行显示。');
     text('full-flow-model','测试执行者 · '+(item.actor||'Claude Code')+' · '+flowModelLabel(item));text('full-flow-stage','阶段 · '+(item.stage_label||item.stage));text('full-flow-updated','更新 · '+dateTime(item.stage_updated_at||item.updated_at));
     text('full-flow-scope',(repairBasis?'本批修复的历史依据 · ':item.historical?'历史测试版本 · ':'固定测试版本 · ')+str(item.task_id)+' · HEAD '+shortSHA(item.head_sha)+(item.historical&&item.current_head_sha?' · 当前工作区 '+shortSHA(item.current_head_sha):'')+'。独立测试不改变主任务状态或验收结论。');
     $('full-flow-package-short').hidden=!item.package_short;if(item.package_short)text('full-flow-package-short',item.package_short.summary);

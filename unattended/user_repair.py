@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from . import gitops, ue_checks
+from .config import CLAUDE_PINNED_MODELS
 from .storage import read_json, write_json, write_text
 
 MODEL = "claude-opus-5-5"
@@ -43,7 +44,7 @@ def load_repair_request(request_path: Path, runtime: Path) -> dict:
             not re.fullmatch(r"[0-9a-fA-F-]{32,36}", str(value["id"])) or
             path != runtime / "user-repairs" / value["id"] / "request.json" or
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", str(value["task_id"])) or
-            value["model"] != MODEL or value["reasoning_effort"] != "high"):
+            not isinstance(value["model"], str) or value["model"] not in CLAUDE_PINNED_MODELS or value["reasoning_effort"] != "high"):
         raise ValueError("Invalid explicit user repair schema or model")
     if not isinstance(value["user_instruction"], str) or not value["user_instruction"].strip() or len(value["user_instruction"]) > 32000:
         raise ValueError("An explicit bounded user instruction is required")
@@ -118,11 +119,19 @@ def _native_answer(path, session):
     answer = ue_checks._object(path, maximum=1024 * 1024)
     parent = Path(path).parent
     process = ue_checks._object(_under(parent / "process.json", parent))
-    actual, terminal, errors, rate, model = parse_full_flow_native(_under(parent / "stdout.log", parent), session)
+    selection = answer.get("model_selection") or {}
+    if not isinstance(selection, dict):
+        raise ValueError("Repair branch has an invalid model selection receipt")
+    requested_model = selection.get("requested_model")
+    if requested_model is None:
+        invocation = parent / "invocation.json"
+        requested_model = ue_checks._object(_under(invocation, parent)).get("model", MODEL) if invocation.exists() else MODEL
+    actual, terminal, errors, rate, model = parse_full_flow_native(
+        _under(parent / "stdout.log", parent), session, requested_model, "high")
     if (process.get("exit_code") != 0 or process.get("timed_out") is not False or process.get("output_limit_exceeded") is not False or
             errors or (rate or {}).get("status") == "rejected" or not model["model_verified"] or terminal["is_error"] or
             answer.get("session_id") != actual or answer.get("answer") != terminal.get("result")):
-        raise ValueError("Repair branch lacks completed native Opus 5.5/high evidence")
+        raise ValueError("Repair branch lacks completed native Claude/high evidence")
     return answer["answer"], model
 
 
@@ -148,7 +157,7 @@ def read_repair_session(task, runtime, out):
                 if (type(event) is not dict or event.get("type") != "system" or event.get("session_id") != expected):
                     return None
                 if event.get("subtype") == "init":
-                    return expected if event.get("model") == MODEL else None
+                    return expected if event.get("model") == profile["model"] else None
                 if event.get("subtype") not in {"ui_invalidate", "task_notification", "task_updated", "background_tasks_changed", "task_started"}:
                     return None
     except (OSError, ValueError, UnicodeError):
@@ -170,7 +179,7 @@ class UserRepair:
         from .providers import AgentProviders
         config = deepcopy(self.config)
         config["_user_repair_profile"] = deepcopy(profile)
-        config.setdefault("claude", {}).update(model=MODEL, reasoning_effort="high")
+        config.setdefault("claude", {}).update(model=profile["model"], reasoning_effort=profile["reasoning_effort"])
         return AgentProviders(config)
 
     def _task_checks(self, task):
@@ -282,7 +291,8 @@ class UserRepair:
                 for key in ("plan_path", "plan_sha256"):
                     if key in request:
                         task["user_repair"][key] = request[key]
-                task.update(coding_model=MODEL, coding_reasoning_effort="high", code_base=request["source_head"], code_resume=False, check_results=[])
+                task.update(coding_model=request["model"], coding_reasoning_effort=request["reasoning_effort"],
+                            code_base=request["source_head"], code_resume=False, check_results=[])
                 task.pop("validation_gate", None)
                 task.setdefault("user_authorization_history", []).append({"id": request["id"], "request_sha256": digest,
                     "previous_reworks": before["task"]["reworks"], "previous_phase": before["phase"], "model_selection": model})

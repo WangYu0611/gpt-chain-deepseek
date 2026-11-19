@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 
 from . import ue_checks
+from .config import CLAUDE_PINNED_MODELS
 from .providers import _CLAUDE_SESSION, _SESSION, _strict_json
 
 MAX_STDOUT_BYTES = 64 * 1024 * 1024
@@ -24,8 +25,8 @@ def parse_full_flow_native(path: Path, requested_session: str | None,
     Indices in the parser audit are zero-based; native result_index is retained
     separately. Raw stdout is never rewritten or stripped into a fake turn.
     """
-    if requested_model != MODEL or effort != "high":
-        raise ValueError("Full-flow native parsing requires the authorized Opus 5.5/high selection")
+    if not isinstance(requested_model, str) or requested_model not in CLAUDE_PINNED_MODELS or effort != "high":
+        raise ValueError("Full-flow native parsing requires an authorized Claude/high selection")
     if requested_session is not None and (not isinstance(requested_session, str) or not _CLAUDE_SESSION.fullmatch(requested_session)):
         raise ValueError("Invalid requested full-flow native session")
     path = Path(path).absolute()

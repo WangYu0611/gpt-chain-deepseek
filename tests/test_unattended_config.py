@@ -89,6 +89,15 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "claude.auth_mode"):
             config.load_config(self.save())
 
+    def test_api_execution_model_uses_configuration_and_native_keeps_authorized_default(self):
+        configured = {"claude": {"auth_mode": "api_key", "model": "claude-fable-5-2"}}
+        self.assertEqual(config.claude_execution_model(configured), "claude-fable-5-2")
+        self.assertEqual(config.claude_execution_model({"claude": {"auth_mode": "api_key"}}), "claude-fable-5-2")
+        configured["claude"]["auth_mode"] = "subscription"
+        self.assertEqual(config.claude_execution_model(configured), config.ART_CODING_MODEL)
+        self.assertEqual(config.claude_execution_model(configured, default="legacy-authorized-model"),
+                         "legacy-authorized-model")
+
     def test_review_transport_defaults_to_codex_and_direct_api_requires_a_model(self):
         self.assertEqual(config.load_config(self.save())["codex"].get("review_transport", "codex"), "codex")
         self.value["codex"]["review_transport"] = "responses_api"

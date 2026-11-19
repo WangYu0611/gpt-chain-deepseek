@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from unattended import gitops, ue_checks
+from unattended.config import CLAUDE_PINNED_MODELS
 from unattended.storage import lock, write_json
 
 REQUIRED_STAGES = ("prepare", "build", "regression", "visual", "package")
@@ -62,8 +63,8 @@ def load_request(path: Path) -> dict:
         raise ValueError("Invalid full-flow identity")
     if not isinstance(request["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", request["head_sha"]):
         raise ValueError("An exact Git SHA is required")
-    if request["model"] != "claude-opus-5-5" or request["effort"] != "high":
-        raise ValueError("This authorized run requires Claude Opus 5.5/high")
+    if not isinstance(request["model"], str) or request["model"] not in CLAUDE_PINNED_MODELS or request["effort"] != "high":
+        raise ValueError("This authorized run requires a pinned Claude/high selection")
     if request["request_sha256"] != request_hash(request):
         raise ValueError("Canonical request SHA does not match")
     if datetime.fromisoformat(request["authorized_at"]).utcoffset() is None:

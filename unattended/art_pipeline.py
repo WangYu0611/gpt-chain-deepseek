@@ -485,7 +485,7 @@ def verify_review(cfg, *, persist=True):
                                            REPO / "art_tools/ue/capture_preview.py")
     # Read the current local ledger under its lock. status() never contacts Tripo
     # or opens the key file; the public review package is only an old snapshot.
-    current_budget = TripoClient(cfg["private_state_dir"], cfg["key_file"],
+    current_budget = TripoClient(cfg["private_state_dir"], cfg["key_file"], network_file=cfg.get("network_file"),
                                 budget_limit=cfg["budget_limit"]).status()["budget"]
     checks = {"processed_artifacts": verify_processed(manifest),
               "ue_assets": verify_import(imported, project, REPO / "art_tools/ue/import_preview.py", manifest),
@@ -522,7 +522,8 @@ def run_preview(cfg, until="capture"):
     statefile = root / "pipeline-state.json"
     with exclusive(Path(cfg["private_state_dir"]) / "pipeline.lock"):
         state = read(statefile) if statefile.is_file() else {"version": 1, "batch_id": cfg["batch_id"]}
-        client = TripoClient(cfg["private_state_dir"], cfg["key_file"], budget_limit=cfg["budget_limit"])
+        client = TripoClient(cfg["private_state_dir"], cfg["key_file"], budget_limit=cfg["budget_limit"],
+                             network_file=cfg.get("network_file"))
         def update(stage, **extra):
             if stage != "failed":
                 state.pop("error", None)

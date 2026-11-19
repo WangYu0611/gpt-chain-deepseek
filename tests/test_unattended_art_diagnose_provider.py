@@ -96,6 +96,25 @@ class ArtDiagnoseProviderTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ProviderError):
                 validate_output("art_diagnose", {**RESULT, **invalid})
 
+    @patch("unattended.providers._claude_authentication", return_value={})
+    def test_api_diagnosis_follows_stored_fable_or_historical_opus_pin(self, auth):
+        self.f.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        for model in ("claude-fable-5-2", ART_CODING_MODEL):
+            with self.subTest(model=model):
+                self.f.state["task"]["coding_model"] = model
+                self.f.state["task"]["art_request"]["model"] = model
+                self.f.state["operation"]["diagnosis_model"] = model
+                self.next_out(model)
+                self.launch.side_effect = self.capture(self.rows(model=model))
+                self.assertEqual(self.invoke(), RESULT)
+                argv = self.launch.call_args.args[0]
+                self.assertEqual(argv[argv.index("--model") + 1], model)
+                self.assertEqual(argv[argv.index("--effort") + 1], "high")
+                receipt = json.loads((self.f.out / "process.json").read_text())
+                self.assertEqual(receipt["diagnosis_model"], model)
+                self.assertTrue(receipt["model_selection"]["model_verified"])
+                self.assertEqual(self.provider.recover("art_diagnose", self.f.out), RESULT)
+
     def test_native_fork_is_read_only_pinned_and_keeps_the_production_session_untouched(self):
         state_before = (self.f.runtime / "state.json").read_bytes()
         config_before = copy.deepcopy(self.f.config)

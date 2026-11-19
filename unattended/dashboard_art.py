@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlencode
 
-from .config import ART_CODING_MODEL, ART_CODING_REASONING_EFFORT, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, load_config
 
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 # Asset manifests enumerate thousands of versioned meshes and textures. Keep
@@ -449,7 +449,7 @@ def collect_art_snapshot(main_config, now):
         result["provider_retry"] = retry
         result["production_progress"] = _production_progress(config, state, now)
         result["blocking_detail"], result["blocking_summary"] = _blocking_text(state)
-        result.update(phase=phase, model=_clean((state.get("task") or {}).get("coding_model") or ART_CODING_MODEL, 120),
+        result.update(phase=phase, model=_clean((state.get("task") or {}).get("coding_model") or claude_execution_model(config), 120),
                       effort=_clean((state.get("task") or {}).get("coding_reasoning_effort") or ART_CODING_REASONING_EFFORT, 40),
                       worker=_worker(runtime, Path(config["config_path"]), now),
                       task_id=_clean((state.get("task") or {}).get("id"), 100),

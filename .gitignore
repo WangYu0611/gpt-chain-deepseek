@@ -10,6 +10,8 @@ __pycache__/
 .env.*
 secrets.local.json
 secrets.local.json.*.tmp
+network.local.json
+network.local.json.*.tmp
 gpt_api.txt
 claude_api.txt
 config.json

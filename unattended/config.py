@@ -15,6 +15,13 @@ from .storage import read_json, write_json
 ROOT = Path(__file__).resolve().parent.parent
 ART_CODING_MODEL = "claude-opus-5-5"
 ART_CODING_REASONING_EFFORT = "high"
+CLAUDE_API_MODEL = "claude-fable-5-2"
+CLAUDE_PINNED_MODELS = frozenset({ART_CODING_MODEL, CLAUDE_API_MODEL})
+
+
+def claude_execution_model(config: dict, default: str = ART_CODING_MODEL) -> str:
+    settings = config.get("claude", {})
+    return settings.get("model", CLAUDE_API_MODEL) if settings.get("auth_mode") == "api_key" else default
 
 
 def validate_model_settings(settings: dict, role: str) -> None:
@@ -189,6 +196,11 @@ def load_config(path: Path) -> dict:
         if any(secret_path == root or secret_path.is_relative_to(root) for root in (project, runtime)):
             raise ValueError("secrets_file 必须放在项目与模型工作目录之外。")
         config["secrets_file"] = str(secret_path)
+    if "network_file" in config:
+        value = config["network_file"]
+        if not isinstance(value, str) or not value.strip() or "\0" in value:
+            raise ValueError("network_file 必须为有效文件路径。")
+        config["network_file"] = _path(value, path.parent)
     if not isinstance(config.get("branch"), str) or not config["branch"].startswith("unattended/"):
         raise ValueError("branch 必须为 unattended/ 下的独立工作分支。")
     config.setdefault("schedule", {})
@@ -423,10 +435,21 @@ def doctor(config: dict) -> dict:
     checks["independent_checks_configured"] = bool(config["checks"])
     from datetime import datetime, timezone
     checks["calendar"] = WorkCalendar(config["schedule"], base_dir=Path(config["config_path"]).parent).describe(datetime.now(timezone.utc))
+    from .network import load_network
+    network_ready = True
+    try:
+        route = load_network(config_path=config.get("config_path"), secrets_file=config.get("secrets_file"),
+                             network_file=config.get("network_file"))
+        if route is not None:
+            checks["network_region"] = route["region"]
+            checks["network_proxy_configured"] = True
+    except ValueError:
+        network_ready = False
+        checks["network_proxy_configured"] = False
     planner_ready = not uses_claude or checks["claude_available"]
     codex_cli_ready = not codex_cli_required or checks["codex_available"]
     ready = (bool(checks.get("project_head")) and codex_auth_ready and claude_auth_ready
-             and planner_ready and coder_ready and codex_cli_ready and review_model_ready
+             and planner_ready and coder_ready and codex_cli_ready and review_model_ready and network_ready
              and checks["calendar"]["calendar_covered"]
              and all(checks.get(x) for x in ("git_identity", "independent_checks_configured")))
     return {"status": "ready" if ready else "needs_setup", "ready": ready, "checks": checks,

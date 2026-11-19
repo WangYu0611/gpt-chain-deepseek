@@ -1,4 +1,4 @@
-"""Run a user-requested, isolated whole-flow test with native Claude Opus.
+"""Run a user-requested, isolated whole-flow test with the configured Claude model.
 
 This operator job does not grant a rework, change the coding model, or accept a
 game task. The original workspace stays paused while a fixed commit is tested.
@@ -18,7 +18,7 @@ import uuid
 
 from github_harness_lab.lab_harness.process import run_process
 from . import gitops, ue_checks
-from .config import load_config
+from .config import CLAUDE_PINNED_MODELS, claude_execution_model, load_config
 from .full_flow_native import parse_full_flow_native
 from .providers import (_claude_command, _claude_environment, _claude_log_record,
                         _claude_model_evidence, _claude_turn, claude_subscription_ready)
@@ -61,7 +61,7 @@ def _request(path):
     if (path != run / "request.json" or Path(value["run_dir"]).resolve() != run or
             Path(value["project_dir"]).resolve() != run / "project" or
             Path(value["source_workspace"]).resolve() != runtime / "workspace" or
-            value.get("model") != MODEL or value.get("effort") != EFFORT or
+            not isinstance(value.get("model"), str) or value["model"] not in CLAUDE_PINNED_MODELS or value.get("effort") != EFFORT or
             value.get("request_sha256") != canonical_hash(value)):
         raise ValueError("Full-flow request binding changed")
     return value, run
@@ -71,13 +71,14 @@ def _status(request, run, **changes):
     path = run / "status.json"
     value = read_json(path) if path.exists() else {}
     value.update(version=1, id=request["id"], request_sha256=request["request_sha256"],
-                 task_id=request["task_id"], head_sha=request["head_sha"], model=MODEL,
-                 effort=EFFORT, updated_at=now(), **changes)
+                 task_id=request["task_id"], head_sha=request["head_sha"], model=request["model"],
+                 effort=request["effort"], updated_at=now(), **changes)
     write_json(path, value)
 
 
 def create(config_path):
     config = load_config(config_path)
+    selected_model = claude_execution_model(config)
     runtime = Path(config["runtime_dir"]).resolve()
     base = runtime / "full-flow"
     with lock(base / "operator.lock"):
@@ -107,22 +108,22 @@ def create(config_path):
                    "runtime_dir": str(runtime), "run_dir": str(run),
                    "project_dir": str(run / "project"),
                    "engine_dir": "C:/Program Files/Epic Games/UE_5.8/Engine",
-                   "authorized_at": now(), "model": MODEL, "effort": EFFORT}
+                   "authorized_at": now(), "model": selected_model, "effort": EFFORT}
         request["request_sha256"] = canonical_hash(request)
         write_json(run / "request.json", request)
-        write_json(run / "operator.json", {"user_request": "用opus5.5把全流程测一次",
+        write_json(run / "operator.json", {"user_request": "使用配置的 Claude 模型执行完整流程测试",
                    "source_session": task["session_id"], "source_state_sha256": file_hash(runtime / "state.json"),
                    "source_reworks": task["reworks"], "owns_pause": owned,
                    "pause_token": token if owned else None,
                    "pause_sha256": file_hash(pause), "pause_mtime_ns": pause.stat().st_mtime_ns,
                    "authorized_at": request["authorized_at"]})
-        _status(request, run, status="planning", stage="plan", summary="Opus 5.5 正在核对完整测试范围。",
+        _status(request, run, status="planning", stage="plan", summary=selected_model + " 正在核对完整测试范围。",
                 output_dir=str(run / "native" / "plan"))
         write_json(current, {"version": 1, "id": ident,
                    "request_path": (Path("full-flow") / "runs" / ident / "request.json").as_posix(),
                    "request_sha256": request["request_sha256"],
                    "request_file_sha256": file_hash(run / "request.json")})
-        return {"request": str(run / "request.json"), "status": "created", "model": MODEL,
+        return {"request": str(run / "request.json"), "status": "created", "model": selected_model,
                 "head_sha": request["head_sha"]}
 
 
@@ -139,10 +140,11 @@ def invoke(config_path, request_path, phase):
             (state.get("task") or {}).get("session_id") != operator["source_session"]):
         raise RuntimeError("The original task, session, or candidate changed")
     settings = config["claude"]
+    selected_model, selected_effort = request["model"], request["effort"]
     if settings.get("auth_mode", "subscription") == "subscription" and not claude_subscription_ready(settings, source):
         raise RuntimeError("Native Claude subscription login is unavailable")
     environment = _claude_environment(settings, config_path=config.get("config_path"),
-                                      secrets_file=config.get("secrets_file"))
+                                      secrets_file=config.get("secrets_file"), network_file=config.get("network_file"))
     output = run / "native" / phase
     if phase == "analysis" and output.exists():
         output = next((run / "native" / f"analysis-{number}" for number in range(2, 10)
@@ -168,7 +170,7 @@ def invoke(config_path, request_path, phase):
              "--disallowedTools", "mcp__*", "Edit", "Write"]
     allowed_tools = ["Read", "Glob", "Grep"]
     common = (
-        "用户最新明确要求：\"用opus5.5把全流程测一次\"。你是本次真实测试负责人，模型为Opus5.5、思考high。\n"
+        f"用户已授权本次完整流程测试。你是本次真实测试负责人，固定模型为{selected_model}、思考{selected_effort}。\n"
         "这是一次完整测试，覆盖当前工程已实现流程及连带影响，不限于原来五项核心自验；不是要求宣称整个未完成的M3已完成。"
         "由你独立判断测试覆盖、读取源码与真实回执，给出你自己的诊断，转达者的意见不作为结论。\n"
         "本次仅测试：不改游戏源文件、定义或测试断言，不编码、不commit/push，不改变主任务的验收状态，不调用美术/付费API。"
@@ -187,7 +189,7 @@ def invoke(config_path, request_path, phase):
             "可提出你认为需要的其他验证，不能用文档检查冒充运行证据；不要声称现在已重测。"
             "中文简明输出计划，并明确哪些历史人工待办无法由自动测试确认。"
         )
-        status, stage, summary, timeout = "planning", "plan", "Opus 5.5 正在独立核对全流程测试方案。", 1800
+        status, stage, summary, timeout = "planning", "plan", selected_model + " 正在独立核对全流程测试方案。", 1800
     else:
         argv += ["--resume", plan["session_id"]]
         helper = ROOT / "unattended" / "full_flow_checks.py"
@@ -261,10 +263,10 @@ def invoke(config_path, request_path, phase):
             "不要给自己无限重试，也不要代替独立审核宣布主任务通过。"
             + supplemental
         )
-        status, stage, summary, timeout = "testing", "prepare", "Opus 5.5 正在执行隔离全流程测试。", 25200
-    argv += ["--allowedTools", *allowed_tools, "--model", MODEL, "--effort", EFFORT]
+        status, stage, summary, timeout = "testing", "prepare", selected_model + " 正在执行隔离全流程测试。", 25200
+    argv += ["--allowedTools", *allowed_tools, "--model", selected_model, "--effort", selected_effort]
     write_text(output / "prompt.txt", prompt)
-    write_json(output / "invocation.json", {"model": MODEL, "effort": EFFORT, "phase": phase,
+    write_json(output / "invocation.json", {"model": selected_model, "effort": selected_effort, "phase": phase,
                "request_sha256": request["request_sha256"], "head_sha": request["head_sha"],
                "timeout_seconds": timeout, "started_at": now(), "read_only_roots": [str(p) for p in documents],
                "orchestrator_sha256": file_hash(Path(__file__)),
@@ -272,7 +274,7 @@ def invoke(config_path, request_path, phase):
                "native_parser_sha256": file_hash(ROOT / "unattended" / "full_flow_native.py"),
                "background_tasks_enabled": phase != "plan"})
     _status(request, run, status=status, stage=stage, summary=summary, output_dir=str(output))
-    print(json.dumps({"status": status, "output": str(output), "model": MODEL}, ensure_ascii=True), flush=True)
+    print(json.dumps({"status": status, "output": str(output), "model": selected_model}, ensure_ascii=True), flush=True)
     with lock(run / "native.lock"):
         try:
             if phase != "plan":
@@ -287,31 +289,31 @@ def invoke(config_path, request_path, phase):
             write_json(output / "process.json", {"exit_code": result.exit_code, "timed_out": result.timed_out,
                        "output_limit_exceeded": result.output_limit_exceeded, "finished_at": now()})
             if result.exit_code or result.timed_out or result.output_limit_exceeded:
-                _status(request, run, status="failed", stage=stage, summary="Opus 本次调用未正常结束，保留全部现场与日志。")
+                _status(request, run, status="failed", stage=stage, summary=selected_model + " 本次调用未正常结束，保留全部现场与日志。")
                 raise RuntimeError("Native full-flow invocation failed; see " + str(output))
             requested_session = None if phase == "plan" else plan["session_id"]
             if phase == "plan":
                 session, terminal, errors, limit = _claude_turn(output / "stdout.log", requested_session)
-                model = _claude_model_evidence(output / "stdout.log", requested_session, MODEL, EFFORT)
+                model = _claude_model_evidence(output / "stdout.log", requested_session, selected_model, selected_effort)
             else:
                 session, terminal, errors, limit, model = parse_full_flow_native(
-                    output / "stdout.log", requested_session, MODEL, EFFORT)
+                    output / "stdout.log", requested_session, selected_model, selected_effort)
             answer = terminal.get("result")
             if (not model.get("model_verified") or errors or (limit or {}).get("status") == "rejected" or terminal.get("is_error") or
                     not isinstance(answer, str) or not answer.strip()):
-                _status(request, run, status="failed", stage=stage, summary="Opus 返回结果或模型证据无效。")
-                raise RuntimeError("Unverified native Opus result")
+                _status(request, run, status="failed", stage=stage, summary=selected_model + " 返回结果或模型证据无效。")
+                raise RuntimeError("Unverified native Claude result")
             if phase == "plan" and session == operator["source_session"]:
                 raise RuntimeError("The planning call did not fork the original coding session")
             if phase != "plan" and session != requested_session:
-                raise RuntimeError("Testing did not resume the verified Opus planning branch")
+                raise RuntimeError("Testing did not resume the verified Claude planning branch")
             write_json(output / "answer.json", {"session_id": session, "answer": answer,
                        "model_selection": model, "finished_at": now()})
             write_text(output / "answer.md", answer)
             if gitops.head(source) != request["head_sha"] or not gitops.clean(source):
                 raise RuntimeError("Testing changed the original candidate")
             if phase == "plan":
-                _status(request, run, status="preparing", stage="prepare", summary="Opus 方案已返回，正在准备隔离测试工具。")
+                _status(request, run, status="preparing", stage="prepare", summary=selected_model + " 方案已返回，正在准备隔离测试工具。")
                 outcome = "planned"
             else:
                 missing = []
@@ -334,14 +336,14 @@ def invoke(config_path, request_path, phase):
                 write_text(run / "report.md", answer)
                 _status(request, run, status="failed" if missing else "completed", stage="analysis",
                         report_path=str(run / "report.md"), missing_stages=missing,
-                        summary=("Opus 已返回报告，但部分测试阶段尚未取得回执：" + ", ".join(missing)) if missing else
-                        "Opus 已完成本轮测试并给出报告；通过与失败以各阶段真实回执为准。")
+                        summary=(selected_model + " 已返回报告，但部分测试阶段尚未取得回执：" + ", ".join(missing)) if missing else
+                        selected_model + " 已完成本轮测试并给出报告；通过与失败以各阶段真实回执为准。")
                 outcome = "incomplete" if missing else "completed"
             print(json.dumps({"status": outcome, "session": session,
                               "output": str(output), "model_verified": True}, ensure_ascii=True), flush=True)
         except Exception as error:
             write_json(output / "operator-error.json", {"type": type(error).__name__, "error": str(error), "at": now()})
-            _status(request, run, status="failed", stage=stage, summary="Opus 调用或证据核验失败，已保留日志：" + type(error).__name__)
+            _status(request, run, status="failed", stage=stage, summary=selected_model + " 调用或证据核验失败，已保留日志：" + type(error).__name__)
             raise
 
 

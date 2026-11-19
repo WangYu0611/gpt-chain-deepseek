@@ -13,7 +13,7 @@ import stat
 from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
-from .config import load_config
+from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, load_config
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed
 
 TAIL_BYTES = 128 * 1024
@@ -374,7 +374,7 @@ def _claude_code_opening(header, session, *, allow_notifications=False):
         kind, subtype = event.get("type"), event.get("subtype")
         if kind == "system" and subtype == "init":
             model = event.get("model")
-            if (active or not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku)-[A-Za-z0-9.-]{1,95}", model) or
+            if (active or not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku|fable)-[A-Za-z0-9.-]{1,95}", model) or
                     observed is not None and model != observed):
                 return None
             observed, active = model, True
@@ -615,6 +615,10 @@ def _operation_model(runtime, operation, directory, session=None, *, allow_notif
     return None, None
 
 
+def _pinned_claude_label(model):
+    return "Fable 5.2" if model == CLAUDE_API_MODEL else "Opus"
+
+
 def _user_repair_context(runtime, task):
     """Read a fixed, hash-bound user authorization without exposing sessions."""
     profile = task.get("user_repair")
@@ -622,7 +626,7 @@ def _user_repair_context(runtime, task):
         return None
     identity = profile.get("id")
     if (profile.get("version") != 1 or not re.fullmatch(r"[a-fA-F0-9]{32}|[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}", str(identity or "")) or
-            profile.get("epoch", identity) != identity or profile.get("model") != "claude-opus-5-5" or
+            profile.get("epoch", identity) != identity or profile.get("model") not in CLAUDE_PINNED_MODELS or
             profile.get("reasoning_effort", profile.get("effort")) != "high" or
             profile.get("effort", "high") != "high" or
             not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", str(profile.get("source_head") or ""))):
@@ -649,7 +653,7 @@ def _user_repair_context(runtime, task):
             request.get("target_session_id") != task.get("session_id") or
             task.get("session_owner_task_id", task.get("id")) != task.get("id")):
         raise ValueError("用户修复授权与当前任务不匹配")
-    public = {"id": identity, "title": "Opus修复全流程问题", "model": profile["model"], "effort": "high", "status": "active",
+    public = {"id": identity, "title": _pinned_claude_label(profile["model"]) + "修复全流程问题", "model": profile["model"], "effort": "high", "status": "active",
               "source_head": profile["source_head"], "source_full_flow_run": source_run.name,
               "request_sha256": profile["request_sha256"], "epoch": identity, "detail_url": "/api/flow/detail?lane=development&node=code"}
     for key in ("activation_rework", "max_cycles", "rework_window"):
@@ -757,7 +761,7 @@ def _replanning_model(runtime, operation, directory):
         session, model = event.get("session_id"), event.get("model")
         if (event.get("type") != "system" or event.get("subtype") != "init" or
                 not isinstance(session, str) or not _CLAUDE_SESSION_ID.fullmatch(session) or
-                not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku)-[A-Za-z0-9.-]{1,95}", model)):
+                not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku|fable)-[A-Za-z0-9.-]{1,95}", model)):
             return None, None
         receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=65536)
         if receipt and receipt.get("kind") != "plan":
@@ -884,7 +888,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
     nodes = []
     for identity, title, module_id in definitions:
         if identity == "code" and user_repair:
-            title = "Opus修复全流程问题"
+            title = user_repair["title"]
             if user_followup and user_followup["status"] == "active" and user_followup.get("turn"):
                 title = user_followup["summary"]
         enabled = critical_enabled if identity == "critical_plan" else bool(config.get("publication")) if identity.startswith("milestone_") else True
@@ -1007,7 +1011,7 @@ def _full_flow_context(config, state=None):
             request.get("runtime_dir") != str(runtime) or request.get("source_workspace") != str(source) or
             request.get("run_dir") != str(run) or request.get("project_dir") != str(project) or
             not isinstance(request.get("engine_dir"), str) or not Path(request["engine_dir"]).is_absolute() or
-            _iso(request.get("authorized_at")) is None or request.get("model") != "claude-opus-5-5" or request.get("effort") != "high"):
+            _iso(request.get("authorized_at")) is None or request.get("model") not in CLAUDE_PINNED_MODELS or request.get("effort") != "high"):
         raise ValueError("全流程测试任务、版本或隔离目录绑定不匹配")
     status = _object(_confined(run, run / "status.json"), missing={}, maximum=65536)
     phases = {"planning", "preparing", "testing", "analyzing", "completed", "failed"}
@@ -1249,7 +1253,7 @@ def _full_flow_stage_projection(context, labels):
                       summary=_clean("多个阶段同时标记运行中：" + "、".join(labels[stage] for stage in stages) + "。暂不判定当前阶段。", 159))
     elif status["status"] in {"testing", "analyzing"} and status["stage"] != "analysis":
         result.update(stage="analysis", stage_label=labels["analysis"], stage_source="fallback",
-                      summary="当前没有绑定阶段标记为运行中；等待 Opus 分析或安排下一步。")
+                      summary=f"当前没有绑定阶段标记为运行中；等待 {_pinned_claude_label(request['model'])} 分析或安排下一步。")
     return result
 
 
@@ -1278,7 +1282,7 @@ def _full_flow_snapshot(config, state, *, context=None):
     historical = bool(current_head and current_head != request["head_sha"] or task_id and task_id != request["task_id"])
     labels = {"planning": "只读规划", "preparing": "准备隔离测试环境", "testing": "执行全流程测试", "analyzing": "分析测试结果", "completed": "本次测试已结束", "failed": "本次测试未完成"}
     stages = {"plan": "测试规划", "prepare": "准备环境", "build": "构建", "regression": "回归测试", "visual": "视觉检查", "package": "打包验证", "package-short": "短路径正式打包补测", "retest": "失败项逐项复测", "analysis": "结果分析"}
-    public = {"id": request["id"], "title": "Opus全流程测试", "task_id": request["task_id"], "head_sha": request["head_sha"],
+    public = {"id": request["id"], "title": _pinned_claude_label(request["model"]) + "全流程测试", "task_id": request["task_id"], "head_sha": request["head_sha"],
             "current_head_sha": current_head, "historical": historical, "status": status["status"], "status_label": labels[status["status"]],
             "stage": status["stage"], "stage_label": stages[status["stage"]], "summary": _clean(status.get("summary"), 159),
             "updated_at": _iso(status["updated_at"]), "actor": "Claude Code", "model": request["model"], "effort": request["effort"],
@@ -1662,7 +1666,7 @@ def collect_snapshot(config_path: Path) -> dict:
                 status.update(code="error", label="重试状态待核实", actor="系统")
         status["summary"] = status["error"] or ("正在规划下一项任务，任务书尚未生成。" if phase == "PLAN" else label)
         if phase == "CODE" and (snapshot.get("task") or {}).get("user_repair") and not status["error"]:
-            status["summary"] = "Opus修复全流程问题；本批修改仍需独立检查与审核。"
+            status["summary"] = snapshot["task"]["user_repair"]["title"] + "；本批修改仍需独立检查与审核。"
             followup = (snapshot.get("task") or {}).get("user_followup")
             if followup and followup.get("turn") and followup["status"] == "active":
                 status["summary"] = followup["summary"] + "；保留原任务独立检查与审核。"

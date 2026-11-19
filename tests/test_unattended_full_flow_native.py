@@ -45,6 +45,20 @@ class NativeBackgroundTests(unittest.TestCase):
         self.assertEqual(value[-1]["raw_stdout_sha256"], hashlib.sha256(original).hexdigest())
         return value
 
+    def test_fable_native_model_is_verified_against_the_explicit_stored_selection(self):
+        selected = "claude-fable-5-2"
+        terminal = result()
+        terminal["modelUsage"] = {selected: {}}
+        events = [init(model=selected), terminal]
+        self.path.write_text("\n".join(json.dumps(row) for row in events) + "\n", encoding="utf-8")
+        original = self.path.read_bytes()
+        proof = native.parse_full_flow_native(self.path, SESSION, selected, "high")[-1]
+        self.assertTrue(proof["model_verified"])
+        self.assertEqual(proof["requested_model"], selected)
+        with self.assertRaises(ValueError):
+            native.parse_full_flow_native(self.path, SESSION)
+        self.assertEqual(self.path.read_bytes(), original)
+
     def background(self):
         return [event("system", subtype="task_notification"), event("system", subtype="task_notification"),
                 init(), result("", origin={"kind": "task-notification"}), init(),

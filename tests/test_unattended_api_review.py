@@ -63,7 +63,7 @@ class ApiReviewTests(unittest.TestCase):
         patch("unattended.secrets.secret_values", return_value=["private-backup-credential"]).start()
 
     def invoke(self, responses, prompt="Inspect this task", *, art_directory=None):
-        def post(payload, key, endpoint, timeout):
+        def post(payload, key, endpoint, timeout, **kwargs):
             self.requests.append((json.loads(payload), key, endpoint, timeout))
             item = responses.pop(0)
             if isinstance(item, BaseException):

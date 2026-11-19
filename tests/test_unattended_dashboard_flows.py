@@ -83,6 +83,20 @@ class DashboardFlowsTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", json.dumps(result))
         self.assertEqual(before, {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.f.root.rglob("*") if p.is_file()})
 
+    def test_idle_art_queue_displays_configured_api_fable_high(self):
+        cfg = json.loads(self.f.art_path.read_text(encoding="utf-8"))
+        cfg["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        write_json(self.f.art_path, cfg)
+        self.f.save_technical_review()
+        state = json.loads((self.f.art_runtime / "state.json").read_text(encoding="utf-8"))
+        state.update(task=None, operation=None, art_pending=[], art_history=[])
+        write_json(self.f.art_runtime / "state.json", state)
+        result = self.project()
+        queue = self.nodes(result)["queue"]
+        self.assertEqual(queue["model"], "claude-fable-5-2")
+        self.assertEqual(queue["effort"], "high")
+        self.assertEqual(queue["model_source"], "configured")
+
     def test_old_wrong_task_batch_or_changed_approved_config_never_claims_tripo_running(self):
         for case in ("old", "foreign_task", "foreign_batch", "changed_config"):
             with self.subTest(case=case):

@@ -35,6 +35,28 @@ class UserFollowupTests(unittest.TestCase):
     def state_now(self):
         return self.engine._load()
 
+    def test_fable_followup_binds_the_stored_repair_model_and_provider_clone(self):
+        fixture = repair_fixtures.UserRepairTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.request["model"] = "claude-fable-5-2"
+        write_json(fixture.path, fixture.request)
+        fixture.activate()
+        state = fixture.f.state()
+        operation = fixture.engine._new_operation(state, "code")
+        request = deepcopy(self.request)
+        request.update(source_operation=operation, source_head=operation["head_sha"],
+                       repair_request_sha256=followup.file_sha(fixture.path))
+        path = fixture.runtime / "user-followups" / request["id"] / "request.json"
+        write_json(path, request)
+        actual = followup.load_followup_request(path, fixture.runtime)
+        self.assertEqual(actual["source_operation"]["coding_model"], "claude-fable-5-2")
+        self.assertEqual(followup._identity(state["task"], actual, fixture.runtime)["model"], "claude-fable-5-2")
+        fixture.engine._providers_injected = False
+        with patch("unattended.providers.AgentProviders") as provider:
+            fixture.engine._followup_providers(state["task"])
+        self.assertEqual(provider.call_args.args[0]["claude"]["model"], "claude-fable-5-2")
+
     def complete_source(self):
         state = self.state_now(); task = state["task"]
         out = Path(self.op["output_dir"])

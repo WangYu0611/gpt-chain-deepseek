@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from .config import ART_CODING_MODEL, ART_CODING_REASONING_EFFORT, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, load_config
 from .calendar import BEIJING
 from .dashboard_state import _clean, _confined, _iso, _object
 
@@ -134,7 +134,7 @@ def _diagnosis_model(runtime, directory, operation, task, receipt):
         session, model = event.get("session_id"), event.get("model")
         if (event.get("type") != "system" or event.get("subtype") != "init" or session == source or
                 not isinstance(session, str) or not _CLAUDE_SESSION_ID.fullmatch(session) or
-                not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku)-[A-Za-z0-9.-]{1,95}", model)):
+                not isinstance(model, str) or not re.fullmatch(r"claude-(?:sonnet|opus|haiku|fable)-[A-Za-z0-9.-]{1,95}", model)):
             return None, None
         effort = _clean(operation.get("diagnosis_reasoning_effort"), 40) or None
         if receipt:
@@ -263,7 +263,7 @@ def _art(main, snapshot, now):
     active = rows[current]
     active["current"] = True
     model, effort, finished = _art_operation(cfg, state, owned) if cfg else (None, None, False)
-    rows["queue"].update(model=model or ART_CODING_MODEL, effort=effort if model else ART_CODING_REASONING_EFFORT,
+    rows["queue"].update(model=model or claude_execution_model(cfg), effort=effort if model else ART_CODING_REASONING_EFFORT,
                          model_source="recorded" if model else "configured")
     rows["review"].update(model=(cfg.get("codex") or {}).get("model"), effort=(cfg.get("codex") or {}).get("reasoning_effort"),
                           model_source="configured" if (cfg.get("codex") or {}).get("model") else None)
@@ -275,7 +275,7 @@ def _art(main, snapshot, now):
         summary += "诊断计划不代表制作完成或视觉验收通过。"
     elif current == "queue" and phase == "CODE":
         summary = "Claude 编写制作脚本、读取参考或准备固定制作入口；尚无本次工具阶段回执。"
-        active.update(model=model or ART_CODING_MODEL, effort=effort if model else ART_CODING_REASONING_EFFORT,
+        active.update(model=model or claude_execution_model(cfg), effort=effort if model else ART_CODING_REASONING_EFFORT,
                       model_source="recorded" if model else "configured")
     elif current == "review":
         active.update(model=(cfg.get("codex") or {}).get("model"), effort=(cfg.get("codex") or {}).get("reasoning_effort"),

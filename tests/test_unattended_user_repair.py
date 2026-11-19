@@ -77,6 +77,33 @@ class UserRepairTests(unittest.TestCase):
         self.assertEqual(self.f.state()["task"]["reworks"], 10)
         self.assertEqual(self.config["claude"]["model"], "claude-sonnet-5-5")
 
+    def test_fable_repair_uses_the_authorized_model_and_verifies_historical_opus_source_evidence(self):
+        self.request["model"] = "claude-fable-5-2"
+        write_json(self.path, self.request)
+        original = self.answer_path.read_bytes(), (self.answer_path.parent / "stdout.log").read_bytes()
+        self.activate()
+        state = self.f.state()
+        self.assertEqual(state["task"]["coding_model"], "claude-fable-5-2")
+        self.assertEqual(state["task"]["user_repair"]["model"], "claude-fable-5-2")
+        operation = self.engine._new_operation(state, "code")
+        self.assertEqual(operation["coding_model"], "claude-fable-5-2")
+        self.engine._providers_injected = False
+        with patch("unattended.providers.AgentProviders") as provider:
+            self.engine._user_repair_providers(state["task"])
+        self.assertEqual(provider.call_args.args[0]["claude"]["model"], "claude-fable-5-2")
+        self.assertEqual((self.answer_path.read_bytes(), (self.answer_path.parent / "stdout.log").read_bytes()), original)
+
+    def test_native_answer_reads_the_stored_fable_model_selection(self):
+        answer = read_json(self.answer_path)
+        answer["model_selection"] = {"requested_model": "claude-fable-5-2"}
+        write_json(self.answer_path, answer)
+        stdout = self.answer_path.parent / "stdout.log"
+        write_text(stdout, stdout.read_text(encoding="utf-8").replace(repair.MODEL, "claude-fable-5-2"))
+        text, proof = repair._native_answer(self.answer_path, TARGET)
+        self.assertEqual(text, answer["answer"])
+        self.assertEqual(proof["requested_model"], "claude-fable-5-2")
+        self.assertTrue(proof["model_verified"])
+
     def test_state_head_scope_and_evidence_drift_refuse_before_activation(self):
         for field in ("source_state_sha256", "source_scope_sha256", "source_head"):
             value = deepcopy(self.request); value[field] = "a" * (40 if field == "source_head" else 64)

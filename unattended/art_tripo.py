@@ -22,6 +22,7 @@ import urllib.request
 import uuid
 
 from .secrets import LOCAL_SECRETS_NAME, read_secret
+from .network import NETWORK_NAME, proxy_handler
 from .storage import atomic_replace, read_json, write_json
 
 TERMINAL = {"success", "failed", "cancelled", "banned", "expired"}
@@ -103,9 +104,14 @@ def _file_digest(path):
 class TripoClient:
     def __init__(self, state_dir, key_file, budget_limit=3000,
                  base_url="https://openapi.tripo3d.com/v3", *, request_timeout=90,
-                 max_download_bytes=2 * 1024**3):
+                 max_download_bytes=2 * 1024**3, network_file=None):
         self.root = Path(state_dir).resolve()
         self.key_file = Path(key_file).resolve()
+        discovered = self.key_file.with_name(NETWORK_NAME)
+        self.network_file = network_file
+        if network_file is None and discovered.exists():
+            self.network_file = discovered
+        self._proxy = proxy_handler(secrets_file=self.key_file, network_file=self.network_file)
         self.budget_limit = _money(budget_limit)
         if not 0 < self.budget_limit <= HARD_CAP:
             raise ValueError("batch budget must be between 0 and 3000 credits")
@@ -253,7 +259,7 @@ class TripoClient:
         data = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8") if body is not None else None
         request = urllib.request.Request(self.base_url + path, data=data, method=method,
                                          headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
-        opener = urllib.request.build_opener(_NoAPIRedirect())
+        opener = urllib.request.build_opener(self._proxy, _NoAPIRedirect())
         with opener.open(request, timeout=self.request_timeout) as response:
             payload = response.read(8 * 1024 * 1024 + 1)
         if len(payload) > 8 * 1024 * 1024:
@@ -343,7 +349,7 @@ class TripoClient:
         temporary = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".part")
         digest, size = hashlib.sha256(), 0
         try:
-            opener = urllib.request.build_opener(_HTTPSRedirect())
+            opener = urllib.request.build_opener(self._proxy, _HTTPSRedirect())
             with opener.open(urllib.request.Request(url), timeout=self.request_timeout) as response:
                 _https(response.geturl())
                 content_length = response.headers.get("Content-Length")

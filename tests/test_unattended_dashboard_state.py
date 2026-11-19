@@ -508,6 +508,21 @@ class DashboardStateTests(unittest.TestCase):
         self.config.update(coding_provider="claude", claude={"command": [str(cli)]})
         self.write(self.config_path, self.config)
 
+    def test_fable_model_is_observed_from_current_native_code_receipt(self):
+        self.select_claude()
+        self.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        self.write(self.config_path, self.config)
+        self.state.update(phase="CODE", task={"id": "TASK-1", "coding_provider": "claude"})
+        self.logs([{"type": "system", "subtype": "init", "session_id": "18d2529d-649c-4ac1-9d45-3c9377291694",
+                    "model": "claude-fable-5-2"}], kind="code")
+        self.state["operation"].update(task_id="TASK-1", coding_provider="claude", coding_model="claude-fable-5-2",
+                                        coding_reasoning_effort="high")
+        snapshot = self.snapshot()
+        developer = next(row for row in snapshot["modules"] if row["id"] == "developer")
+        self.assertEqual(developer["model"], "claude-fable-5-2")
+        self.assertEqual(developer["effort"], "high")
+        self.assertEqual(developer["model_source"], "recorded")
+
     def test_claude_activity_is_bounded_and_session_comes_from_owned_init_record(self):
         self.select_claude()
         session = "18d2529d-649c-4ac1-9d45-3c9377291694"

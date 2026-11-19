@@ -15,6 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .providers import REVIEW_SCHEMA, ProviderError, _atomic_json, _codex_api_key, _strict_json, validate_output
 from .review_evidence import ReviewEvidence
+from .network import proxy_handler
 from .secrets import read_secret, validate_api_base_url
 
 
@@ -105,13 +106,13 @@ def _retry_after(value):
     return max(1, min(86400, math.ceil(seconds))) if math.isfinite(seconds) and seconds >= 0 else None
 
 
-def _post(payload, key, endpoint, timeout):
+def _post(payload, key, endpoint, timeout, *, proxy=None):
     request = Request(endpoint, data=payload, method="POST", headers={
         "Authorization": "Bearer " + key, "Content-Type": "application/json", "Accept": "application/json",
         "User-Agent": "unattended-task-review/1",
     })
     try:
-        with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+        with build_opener(proxy if proxy is not None else proxy_handler(), _NoRedirect()).open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise _OutputLimit("API review response exceeded its size limit")
@@ -212,6 +213,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
                      key=len, reverse=True)
     base = validate_api_base_url(read_secret("CODEX_BASE_URL", config_path=config.get("config_path"),
                                               secrets_file=config.get("secrets_file")) or "https://api.openai.com/v1")
+    proxy = proxy_handler(config_path=config.get("config_path"), secrets_file=config.get("secrets_file"),
+                          network_file=config.get("network_file"))
     evidence = ReviewEvidence(config, Path(cwd), out, art_directory=art_directory)
     head = evidence.head_sha
     if not isinstance(head, str) or not _HEAD.fullmatch(head):
@@ -261,7 +264,7 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None):
             if len(payload) > MAX_TRANSCRIPT_BYTES:
                 receipt["output_limit_exceeded"] = True
                 raise ProviderError("API review request exceeded its transcript limit")
-            response, wire_hash = _post(payload, key, base + "/responses", remaining)
+            response, wire_hash = _post(payload, key, base + "/responses", remaining, proxy=proxy)
             response = _redact(response, secrets, protocol=True)
             response_path = out / "responses" / f"turn-{number:04d}.json"
             response_hash, size = _save(response_path, response)

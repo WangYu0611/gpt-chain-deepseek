@@ -82,7 +82,7 @@ class ArtProviderTests(unittest.TestCase):
             self.f.state["operation"]["output_dir"] = str(self.f.out)
             self.f.save_state()
             launch.side_effect = self.capture_claude(rows)
-            with self.subTest(index=index), self.assertRaisesRegex(ProviderError, "Opus"):
+            with self.subTest(index=index), self.assertRaisesRegex(ProviderError, "required model"):
                 AgentProviders(self.f.config).code("Produce art.", self.f.workspace, self.f.out, 120)
             receipt = json.loads((self.f.out / "process.json").read_text())
             self.assertFalse(receipt["model_selection"]["model_verified"])
@@ -99,6 +99,26 @@ class ArtProviderTests(unittest.TestCase):
                 AgentProviders(self.f.config).code("Produce art.", self.f.workspace, self.f.out, 120)
             self.f.state["operation"][field] = original
         launch.assert_not_called()
+
+    @patch("unattended.providers._claude_authentication", return_value={})
+    @patch("unattended.providers.run_process")
+    def test_api_art_uses_stored_fable_pin_and_preserves_historical_opus_receipts(self, launch, auth):
+        self.f.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        for model in ("claude-fable-5-2", ART_CODING_MODEL):
+            with self.subTest(model=model):
+                self.f.out = self.f.runtime / "runs" / model
+                task = self.f.state["task"]
+                task["coding_model"] = task["art_request"]["model"] = model
+                self.f.state["operation"].update(coding_model=model, output_dir=str(self.f.out))
+                self.f.save_state()
+                launch.side_effect = self.capture_claude(self.rows(model))
+                provider = AgentProviders(self.f.config)
+                result = provider.code("Produce art.", self.f.workspace, self.f.out, 120)
+                argv = launch.call_args.args[0]
+                self.assertEqual(argv[argv.index("--model") + 1], model)
+                self.assertEqual(argv[argv.index("--effort") + 1], "high")
+                self.assertTrue(result["model_selection"]["model_verified"])
+                self.assertEqual(provider.recover("code", self.f.out), result)
 
     @patch("unattended.providers.claude_subscription_ready", return_value=True)
     @patch("unattended.providers.run_process")

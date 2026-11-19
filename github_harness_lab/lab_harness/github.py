@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 import json
 import math
 import os
+from pathlib import Path
 import re
 import time
 from typing import Callable
@@ -62,7 +63,13 @@ class _NoRedirect(HTTPRedirectHandler):
 
 def urllib_transport(request: Request, timeout: float, max_bytes: int) -> Response:
     """The sole network boundary; clients must gate before reaching this call."""
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    try:
+        from unattended.network import proxy_handler
+    except ModuleNotFoundError:
+        route = ProxyHandler()
+    else:
+        route = proxy_handler(config_path=Path(__file__).resolve().parents[2] / "unattended.local.json")
+    opener = build_opener(route, _NoRedirect())
     try:
         stream = opener.open(request, timeout=timeout)
     except HTTPError as exc:

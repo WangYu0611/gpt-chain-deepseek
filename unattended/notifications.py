@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from .secrets import read_secret
+from .network import proxy_handler
 from .storage import lock, write_json
 
 ART_EVENTS = ("art_review_ready", "art_accepted", "art_rework", "art_blocked")
@@ -103,7 +104,7 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def _post(webhook, payload):
+def _post(webhook, payload, *, config_path=None):
     """Return only fixed diagnostic codes; never server text or exceptions."""
     try:
         validate_webhook(webhook)
@@ -111,7 +112,7 @@ def _post(webhook, payload):
         if len(body) > 18000:
             return False, "card_too_large"
         req = request.Request(webhook, data=body, headers={"Content-Type": "application/json; charset=utf-8"}, method="POST")
-        with request.build_opener(_NoRedirect()).open(req, timeout=8) as response:
+        with request.build_opener(_NoRedirect(), proxy_handler(config_path=config_path)).open(req, timeout=8) as response:
             if response.status != 200:
                 return False, "http_error"
             raw = response.read(65537)
@@ -469,7 +470,7 @@ class NotificationMonitor:
         row.update(state="sending", attempts=row["attempts"] + 1)
         journal["delivery"].update(last_event=row["event"], last_attempt_at=now.isoformat())
         self._save(journal)  # Reserve before HTTP; crashed attempts are not replayed.
-        ok, failure = _post(settings["webhook_url"], row["card"])
+        ok, failure = _post(settings["webhook_url"], row["card"], config_path=self.config_path)
         row["state"] = "sent" if ok else "failed" if row["attempts"] >= MAX_ATTEMPTS else "pending"
         row["next_at"] = now.timestamp() + BACKOFF[min(row["attempts"] - 1, len(BACKOFF) - 1)]
         journal["delivery"]["last_error"] = failure

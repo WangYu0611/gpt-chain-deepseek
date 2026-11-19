@@ -58,6 +58,8 @@ Codex 和 Claude API 模式优先读取共享文件，缺少密钥时查找进�
 
 任务、阶段与美术审核支持直接调用 OpenAI Responses API。在 `codex` 配置中设置 `"review_transport": "responses_api"`，并配置 `model`、`reasoning_effort` 和共享密钥文件。审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 响应与工具记录保存在对应运行目录，重启时验证回执后恢复。该模式通过 `CODEX_API_KEY` 调用普通 API，API 错误会记录并按类型重试。
 
+Claude API 配置使用 `claude-fable-5-2` 与 `high`。主程序和独立美术 worker 可通过 `network_file` 指向同一个 `network.local.json`，结构见 `network.example.json`。网络配置包含固定代理地址 `proxy_url` 和出口地区 `region`，本项目使用 `SG`。OpenAI、Claude、DSH、飞书、Tripo API 与下载均应用该代理，Git 发布也使用同一配置。配置为必需文件时，文件缺失或代理不可达会报告失败。Clash 专用监听器固定使用新加坡节点，切换订阅后需要重新配置并验证出口。
+
 ## 历史入口：GitHub × DSH 配置
 
 双击项目目录中的 **`打开GitHub仓库设置.cmd`**，打开本地设置窗口。也可以运行 `github-harness.cmd`。

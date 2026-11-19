@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 
 from . import gitops, ue_checks
+from .config import CLAUDE_PINNED_MODELS
 from .storage import lock, read_json, write_json, write_text
 from .user_repair import MODEL, _under, file_sha, validate_repair_profile
 
@@ -38,8 +39,9 @@ def load_followup_request(request_path, runtime):
             op.get("head_sha") != value["source_head"] or op.get("requested_session_id") != value["session_id"] or
             op.get("user_repair_id") != value["repair_id"] or
             op.get("user_repair_request_sha256") != value["repair_request_sha256"] or
-            op.get("coding_model") != MODEL or op.get("coding_reasoning_effort") != "high"):
-        raise ValueError("Follow-up source is not the authorized Opus CODE operation")
+            not isinstance(op.get("coding_model"), str) or op["coding_model"] not in CLAUDE_PINNED_MODELS or
+            op.get("coding_reasoning_effort") != "high"):
+        raise ValueError("Follow-up source is not the authorized Claude CODE operation")
     out = _under(op.get("output_dir", ""), runtime / "runs")
     if out.parent != runtime / "runs" or not re.fullmatch(r"code-[0-9a-f]{32}", out.name):
         raise ValueError("Follow-up source output is not a managed CODE run")
@@ -50,6 +52,7 @@ def _identity(task, request, runtime):
     repair = validate_repair_profile(task, runtime)
     if (not repair or task.get("kind") == "art" or task.get("coding_provider") != "claude" or
             task.get("id") != request["task_id"] or task.get("session_id") != request["session_id"] or
+            request["source_operation"]["coding_model"] != repair["model"] or
             repair["id"] != request["repair_id"] or repair["request_sha256"] != request["repair_request_sha256"]):
         raise ValueError("Follow-up belongs to another task, repair authorization or native session")
     return repair
@@ -168,19 +171,20 @@ class UserFollowup:
         process = ue_checks._object(process_path)
         if process.get("timed_out") is True:
             return self._followup_interrupted_source(request, task, process, process_path, stdout)
-        session, terminal, errors, rate, model = parse_full_flow_native(stdout, request["session_id"])
+        session, terminal, errors, rate, model = parse_full_flow_native(
+            stdout, request["session_id"], op["coding_model"], op["coding_reasoning_effort"])
         if (process.get("exit_code") != 0 or process.get("timed_out") is not False or
                 process.get("output_limit_exceeded") is not False or process.get("task_id") != request["task_id"] or
                 process.get("head_sha") != op["head_sha"] or process.get("requested_session") != session or
                 Path(process.get("output_dir", "")).absolute() != out or
                 Path(process.get("workspace", "")).absolute() != self.runtime / "workspace" or
                 process.get("strict_model_selection") is not True or process.get("native_protocol") != "full_flow_native_v1" or
-                process.get("coding_model") != MODEL or process.get("coding_reasoning_effort") != "high" or
+                process.get("coding_model") != op["coding_model"] or process.get("coding_reasoning_effort") != op["coding_reasoning_effort"] or
                 process.get("user_repair_profile", {}).get("id") != request["repair_id"] or
                 process.get("user_repair_profile", {}).get("request_sha256") != request["repair_request_sha256"] or
                 errors or (rate or {}).get("status") == "rejected" or terminal.get("is_error") is not False or
                 model.get("model_verified") is not True or process.get("model_selection") != model):
-            raise ValueError("Follow-up source CODE lacks its actual completed Opus/session receipt")
+            raise ValueError("Follow-up source CODE lacks its actual completed Claude/session receipt")
         delivered = _under(self.runtime / "tasks" / task["id"] / f"delivery-{task['reworks']}.md", self.runtime)
         if (delivered.stat().st_size > 4 * 1024 * 1024 or task.get("delivery_text") != terminal.get("result") or
                 delivered.read_text(encoding="utf-8-sig") != terminal.get("result") or
@@ -217,7 +221,8 @@ class UserFollowup:
         return {"version": 1, "source_status": "interrupted", "completed": False,
                 "opening_verified": True, "model_verified": False,
                 "task_id": task["id"], "session_id": request["session_id"],
-                "model": MODEL, "reasoning_effort": "high", "original_request_sha256": file_sha(request_path),
+                "model": op["coding_model"], "reasoning_effort": op["coding_reasoning_effort"],
+                "original_request_sha256": file_sha(request_path),
                 "original_operation": deepcopy(op), "operation_sha256": operation_sha,
                 "process_sha256": file_sha(process_path), "stdout_sha256": file_sha(stdout),
                 "original_process_model_selection": deepcopy(process.get("model_selection")),
@@ -317,7 +322,7 @@ class UserFollowup:
         from .providers import AgentProviders
         config = deepcopy(self.config)
         config.update(_user_repair_profile=deepcopy(repair), _user_followup_profile=deepcopy(profile))
-        config.setdefault("claude", {}).update(model=MODEL, reasoning_effort="high")
+        config.setdefault("claude", {}).update(model=repair["model"], reasoning_effort=repair["reasoning_effort"])
         return AgentProviders(config)
 
     def _user_repair_providers(self, task):
@@ -365,7 +370,7 @@ class UserFollowup:
         result = self._invoke(state, "code", prompt, work, providers=self._followup_providers(task))
         if (result.get("completed") is not True or result.get("session_id") != profile["session_id"] or
                 result.get("model_selection", {}).get("model_verified") is not True):
-            raise ValueError("Follow-up lacks a completed same-session verified Opus native turn")
+            raise ValueError("Follow-up lacks a completed same-session verified Claude native turn")
         candidate = gitops.verify_candidate(work, task["base_sha"], task["id"])
         op = deepcopy(state["operation"])
         gitops.git(work, "merge-base", "--is-ancestor", op["head_sha"], candidate["head_sha"])

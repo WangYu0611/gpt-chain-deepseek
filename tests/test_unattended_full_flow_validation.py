@@ -94,6 +94,31 @@ class FullFlowOperatorTests(unittest.TestCase):
         self.assertEqual(self.native_environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         self.assertEqual((self.runtime / "state.json").read_bytes(), self.original_state)
 
+    def test_new_api_full_flow_uses_fable_and_keeps_the_stored_model_when_config_changes(self):
+        self.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        request = self.create()
+        original = request.read_bytes()
+        self.assertEqual(read_json(request)["model"], "claude-fable-5-2")
+        captured = self.native()
+        self.config["claude"]["model"] = "claude-opus-5-5"
+        with patch.object(flow, "_claude_model_evidence", return_value={"model_verified": True}) as proof:
+            flow.invoke(Path("ignored"), request, "plan")
+        argv = captured[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-fable-5-2")
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(proof.call_args.args[2:], ("claude-fable-5-2", "high"))
+        self.assertEqual(read_json(request.parent / "status.json")["model"], "claude-fable-5-2")
+        self.assertEqual(request.read_bytes(), original)
+
+    def test_historical_opus_request_keeps_its_own_model_under_api_configuration(self):
+        request = self.create()
+        original = request.read_bytes()
+        self.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2")
+        captured = self.native()
+        flow.invoke(Path("ignored"), request, "plan")
+        self.assertEqual(captured[0][captured[0].index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(request.read_bytes(), original)
+
     def test_api_full_flow_skips_subscription_and_redacts_environment_credentials(self):
         request = self.create()
         captured = self.native()
@@ -106,7 +131,7 @@ class FullFlowOperatorTests(unittest.TestCase):
             flow.invoke(Path("ignored"), request, "plan")
         subscription.assert_not_called()
         resolve.assert_called_once_with(self.config["claude"], config_path=self.config["config_path"],
-                                        secrets_file=self.config["secrets_file"])
+                                        secrets_file=self.config["secrets_file"], network_file=None)
         self.assertEqual(launch.call_args.kwargs["secrets"], ["test-anthropic-key"])
         self.assertEqual(launch.call_args.kwargs["environment"]["ANTHROPIC_API_KEY"], "test-anthropic-key")
         policy = json.loads(captured[0][captured[0].index("--settings") + 1])

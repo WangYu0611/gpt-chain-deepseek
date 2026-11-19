@@ -70,6 +70,19 @@ class PlanningModelTests(unittest.TestCase):
         self.assertEqual(task["planning_source_output_dir"], str(source))
         self.assertNotIn("planning_selection", self.state())
 
+    def test_api_routine_and_critical_planning_both_follow_configured_fable_high(self):
+        self.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2",
+                                      critical_plan_model="claude-fable-5-2", critical_plan_reasoning_effort="high")
+        self.providers.plan.side_effect = [proposal("critical"), proposal("critical")]
+        self.assertEqual(self.engine.step()["phase"], "PLAN")
+        self.assertEqual(self.restart().step()["phase"], "CODE")
+        for call in self.providers.plan.call_args_list:
+            self.assertEqual(call.kwargs["model"], "claude-fable-5-2")
+            self.assertEqual(call.kwargs["reasoning_effort"], "high")
+            self.assertNotIn("Sonnet", call.args[0])
+            self.assertNotIn("Opus", call.args[0])
+        self.assertEqual(self.state()["task"]["planning_model"], "claude-fable-5-2")
+
     def test_opus_transient_retry_keeps_model_and_effort_when_config_changes(self):
         error = ProviderError("Temporary overload", transient=True, retry_reason="server_unavailable")
         self.providers.plan.side_effect = [proposal("critical"), error, proposal("critical")]

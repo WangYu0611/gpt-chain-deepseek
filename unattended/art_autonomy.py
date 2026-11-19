@@ -118,7 +118,7 @@ class ArtAutonomy:
         directory = _safe_under(self.runtime, Path("tasks") / task["id"])
         write_json(directory / "task.json", task)
         write_text(directory / "TASK.md", task["id"] + " " + task["title"] + "\n\n" + task["body"] +
-                   "\n\n执行：Claude Opus 5.5 / high。资产生产不得更改主项目源码或提交。\n")
+                   f"\n\n执行：{task['coding_model']} / high。资产生产不得更改主项目源码或提交。\n")
         queue = self.art_queue()
         entry = next((row for row in queue["requests"] if row.get("id") == task["id"]), None)
         if entry is not None:

@@ -87,8 +87,17 @@ class FullFlowChecksTests(unittest.TestCase):
         self.request["project_dir"] = str(self.project)
         self.request["effort"] = "low"
         self.save()
-        with self.assertRaisesRegex(ValueError, "Opus"):
+        with self.assertRaisesRegex(ValueError, "Claude/high"):
             flow.load_request(self.path)
+
+    def test_fable_and_historical_opus_authorizations_keep_their_canonical_hashes(self):
+        for model in ("claude-opus-5-5", "claude-fable-5-2"):
+            self.request["model"] = model
+            self.save()
+            original = self.path.read_bytes()
+            with self.subTest(model=model):
+                self.assertEqual(flow.load_request(self.path)["model"], model)
+                self.assertEqual(self.path.read_bytes(), original)
 
     def test_full_namespace_parser_counts_failure_and_preserves_skip_truth(self):
         names = ["ZhuGuoCity.M0.Fixture", flow.PACKAGE_TEST, "ZhuGuoCity.M3.DeathFlow"]

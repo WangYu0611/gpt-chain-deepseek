@@ -9,7 +9,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from unattended.art_pipeline import atomic, read, recipe_overlay
-from unattended.config import load_config
+from unattended.config import claude_execution_model, load_config
 from unattended.engine import Engine
 from unattended.art_worker import ArtWorker
 
@@ -67,7 +67,7 @@ def main():
     atomic(Path(approved['artifacts_dir']) / 'art-brief.json', brief)
     (WORK / 'AGENTS.md').write_text(
         '# 无人值守美术工作区\n仅处理美术任务，不是zhuguo功能开发工作副本。\n'
-        '使用Claude Opus 5.5，high思考。固定A风格，3000积分累计上限，仅L1/L4/L8及必要道具。\n'
+        f'使用{claude_execution_model(original)}，high思考。固定A风格，3000积分累计上限，仅L1/L4/L8及必要道具。\n'
         '可修改art-jobs/TASK-ART-0001/recipe.json中的受限字段。L1 v002已按用户贫困茅屋要求预填；'
         'L4/L8沿用v001，本次不重新生成它们。更改已生成提示词必须递增版本，不得绕过预算。\n'
         '仅执行控制器提供的固定preview命令；不得直接调用Tripo、读密钥、改账本或可信批次配置。\n'
@@ -91,8 +91,10 @@ def main():
                   schedule={'always_on': True, 'timezone': 'Asia/Shanghai'}, step_timeout_seconds=7200,
                   goal='按版本化A风格和真实生活条件分批制作美术，独立验收后自动加入zhuguo资产库。')
     worker['claude'] = copy.deepcopy(read(RUNTIME / 'provider.json')['claude'])
+    if original.get('claude', {}).get('auth_mode') == 'api_key':
+        worker['claude']['auth_mode'] = 'api_key'
     worker['claude'].pop('critical_plan_reasoning_effort', None)
-    worker['claude'].update(model='claude-opus-5-5', reasoning_effort='high')
+    worker['claude'].update(model=claude_execution_model(original), reasoning_effort='high')
     worker['art_pipeline'] = {'config_file': str(approved_file), 'task_ids': ['TASK-ART-0001'],
                               'artifacts_dir': approved['artifacts_dir']}
     worker['art_promotion'] = {'target_config_file': str(MAIN), 'target_branch': 'main', 'push': False, 'remote': 'origin'}
@@ -117,7 +119,7 @@ def finish_setup():
         raise RuntimeError('Main controller binding changed; main config restored')
     print(json.dumps({'status': 'ready', 'worker_config': str(WORKER_CONFIG),
                       'main_binding_unchanged': True,
-                      'task': 'TASK-ART-0001', 'model': 'claude-opus-5-5', 'effort': 'high'}, ensure_ascii=False))
+                      'task': 'TASK-ART-0001', 'model': claude_execution_model(verified), 'effort': 'high'}, ensure_ascii=False))
 
 if __name__ == '__main__':
     main()

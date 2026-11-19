@@ -153,6 +153,21 @@ class ArtEngineTests(unittest.TestCase):
         self.assertEqual(op["coding_model"], "claude-opus-5-5")
         self.assertEqual(op["coding_reasoning_effort"], "high")
 
+    def test_api_art_request_and_dispatched_operation_pin_configured_fable_high(self):
+        self.config["claude"].update(auth_mode="api_key", model="claude-fable-5-2", reasoning_effort="high")
+        self.dispatch()
+        task = self.state()["task"]
+        self.assertEqual(task["coding_model"], "claude-fable-5-2")
+        self.assertEqual(task["art_request"]["model"], "claude-fable-5-2")
+        self.assertEqual(task["coding_reasoning_effort"], "high")
+        book = self.engine.runtime / "tasks" / TASK / "TASK.md"
+        self.assertIn("claude-fable-5-2 / high", book.read_text(encoding="utf-8"))
+        self.providers.code.side_effect = RuntimeError("Interrupted before model result")
+        self.engine.step()
+        operation = self.state()["operation"]
+        self.assertEqual(operation["coding_model"], "claude-fable-5-2")
+        self.assertEqual(operation["coding_reasoning_effort"], "high")
+
     def test_pending_art_does_not_block_normal_task_planning_or_repeat_production(self):
         pending = self.pending()
         self.providers.plan.return_value = {"action": "task", "reason": "next", "title": "Normal game task",

@@ -26,9 +26,10 @@ from github_harness_lab.lab_harness.dsh import parse_events
 from github_harness_lab.lab_harness.dsh_legacy import VERIFIED_VERSION, parse_legacy_events
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import ue_checks
-from .config import (ART_CODING_MODEL, ART_CODING_REASONING_EFFORT,
+from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS,
                      validate_art_pipeline_settings, validate_model_settings)
 from .secrets import read_secret, validate_api_base_url
+from .network import proxy_environment
 from .storage import atomic_replace
 
 
@@ -1244,10 +1245,10 @@ def _claude_repair_context(config: dict, cwd: Path, out: Path, session: str | No
                 not isinstance(session, str) or not _CLAUDE_SESSION.fullmatch(session) or
                 task.get("session_owner_task_id", task["id"]) != task["id"] or
                 op.get("requested_session_id") != session or
-                op.get("coding_provider") != "claude" or op.get("coding_model") != "claude-opus-5-5" or
+                op.get("coding_provider") != "claude" or op.get("coding_model") != profile["model"] or
                 op.get("coding_reasoning_effort") != "high" or
                 config.get("coding_provider") != "claude" or
-                config.get("claude", {}).get("model") != "claude-opus-5-5" or
+                config.get("claude", {}).get("model") != profile["model"] or
                 config.get("claude", {}).get("reasoning_effort") != "high"):
             raise ValueError("repair session or pinned model differs from its operation")
         binding = {"task_id": task["id"], "workspace": str(cwd), "output_dir": str(out),
@@ -1321,10 +1322,10 @@ def _claude_repair_preflight(config: dict, cwd: Path, out: Path, context: tuple)
             fixed.append(command)
             directories.extend(binary_dirs)
         prompt = (
-            "\n本轮是用户明确授权的完整修复，由你本人以 Opus 5.5/high 自主诊断、修改项目 Source、测试和 Tools，并本地 git commit。"
+            f"\n本轮是用户明确授权的完整修复，由你本人以 {task['user_repair']['model']}/high 自主诊断、修改项目 Source、测试和 Tools，并本地 git commit。"
             "原始只读测试阶段已经结束；该阶段‘不修改源码’限制不适用于本轮修复。禁止修改控制器框架、运行态、历史回执或用户授权范围；"
             "框架问题列明事实交维护者处理，不以删除用例、放宽断言、跳过检查或已知失败基线代替修复。\n"
-            f"本次授权：{task['user_repair']['request_path']}；真实 Opus 方案/报告及原始证据：{source_run.as_posix()}；"
+            f"本次授权：{task['user_repair']['request_path']}；真实方案/报告及原始证据：{source_run.as_posix()}；"
             f"原任务审核目录：{(runtime / 'tasks' / task['id']).as_posix()}。先读取这些材料，自行决定实现。\n"
             "保留既有编译与五项核心检查。以下额外命令只限本任务，全部 M 与每个 Local 必须核对实际发现/执行/Success，"
             "Local 还须核对真实 D3D12 与当轮截图；PackageIntegration 必须正式执行，前缀扫描的跳过不算通过。\n" +
@@ -1574,13 +1575,15 @@ def _managed_art_task(config: dict, cwd: Path, out: Path, kind: str) -> tuple[di
             raise ValueError("linked art runtime")
         for relative in ("workspace", "runs", "state.json", Path("runs") / out.name):
             ue_checks._safe_under(runtime, relative)
-        if task.get("coding_model") != ART_CODING_MODEL or task.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT:
-            raise ValueError("art tasks require Claude Opus 5.5 high")
-        if kind == "code" and (operation.get("coding_model") != ART_CODING_MODEL or
+        if task.get("coding_model") not in CLAUDE_PINNED_MODELS or task.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT:
+            raise ValueError("art tasks require an authorized pinned Claude model and high effort")
+        if task.get("art_request", {}).get("model", task["coding_model"]) != task["coding_model"]:
+            raise ValueError("art task model differs from its queued request")
+        if kind == "code" and (operation.get("coding_model") != task["coding_model"] or
                                operation.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT):
             raise ValueError("art operation model differs from its task")
         if kind == "art_diagnose" and (operation.get("diagnosis_provider") != "claude" or
-                operation.get("diagnosis_model") != ART_CODING_MODEL or
+                operation.get("diagnosis_model") != task["coding_model"] or
                 operation.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT):
             raise ValueError("art diagnosis model differs from its task")
         return task, settings
@@ -1632,7 +1635,7 @@ def _codex_art_review_directory(config: dict, cwd: Path, out: Path) -> Path | No
     return _art_public_evidence_directory(config, cwd, out, "review")
 
 
-def _claude_art_diagnosis_context(config: dict, cwd: Path, out: Path, source: str) -> tuple[list[Path], dict]:
+def _claude_art_diagnosis_context(config: dict, cwd: Path, out: Path, source: str) -> tuple[list[Path], dict, dict]:
     """Grant only this task's public evidence, never the whole runtime or credentials."""
     context = _managed_art_task(config, cwd, out, "art_diagnose")
     if context is None:
@@ -1668,7 +1671,7 @@ def _claude_art_diagnosis_context(config: dict, cwd: Path, out: Path, source: st
                         pending.append(child)
         binding = {"task_id": task["id"], "workspace": str(Path(cwd).resolve()),
                    "output_dir": str(Path(out).resolve()), "head_sha": head}
-        return directories, binding
+        return directories, binding, task
     except (KeyError, TypeError, ValueError, OSError, AttributeError) as error:
         raise ProviderError("Claude art diagnosis requires task-scoped read-only evidence: " + str(error)) from error
 
@@ -1815,8 +1818,10 @@ def _claude_validation_read_directory(config: dict, cwd: Path, out: Path) -> Pat
 
 
 def _claude_environment(settings: dict | None = None, *, config_path: str | Path | None = None,
-                        secrets_file: str | Path | None = None) -> dict[str, str]:
+                        secrets_file: str | Path | None = None,
+                        network_file: str | Path | None = None) -> dict[str, str]:
     environment = safe_environment()
+    environment.update(proxy_environment(config_path=config_path, secrets_file=secrets_file, network_file=network_file))
     environment.update({key: os.environ[key] for key in _CLAUDE_ENV if os.environ.get(key)})
     environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
     mode = (settings or {}).get("auth_mode", "subscription")
@@ -1846,8 +1851,9 @@ def _claude_environment(settings: dict | None = None, *, config_path: str | Path
 
 
 def _claude_authentication(settings: dict, cwd: Path, *, config_path: str | Path | None = None,
-                           secrets_file: str | Path | None = None) -> dict[str, str]:
-    environment = _claude_environment(settings, config_path=config_path, secrets_file=secrets_file)
+                           secrets_file: str | Path | None = None,
+                           network_file: str | Path | None = None) -> dict[str, str]:
+    environment = _claude_environment(settings, config_path=config_path, secrets_file=secrets_file, network_file=network_file)
     if settings.get("auth_mode", "subscription") == "subscription" and not claude_subscription_ready(settings, cwd):
         raise ProviderError("Claude requires an active native Claude Pro login")
     return environment
@@ -2040,6 +2046,9 @@ class AgentProviders:
         if "reasoning_effort" in settings:
             argv.extend(["-c", "model_reasoning_effort=" + json.dumps(settings["reasoning_effort"])])
         environment = safe_environment()
+        environment.update(proxy_environment(config_path=self.config.get("config_path"),
+                                               secrets_file=self.config.get("secrets_file"),
+                                               network_file=self.config.get("network_file")))
         auth_variables = ("CODEX_HOME", "NODE_EXTRA_CA_CERTS")
         if auth_mode == "api_key":
             key = _codex_api_key(self.config.get("config_path"), secrets_file=self.config.get("secrets_file"))
@@ -2158,6 +2167,9 @@ class AgentProviders:
             argv.extend(["--session-id", session_id])
         argv.append("-")
         environment = safe_environment()
+        environment.update(proxy_environment(config_path=self.config.get("config_path"),
+                                               secrets_file=self.config.get("secrets_file"),
+                                               network_file=self.config.get("network_file")))
         environment.update(ELECTRON_RUN_AS_NODE="1", DSH_PERMISSION_MODE=permission)
         if settings.get("home"):
             home = Path(settings["home"]).expanduser().resolve()
@@ -2194,7 +2206,8 @@ class AgentProviders:
         if settings.get("plan_instructions"):
             prompt += "\n" + str(settings["plan_instructions"])
         environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
-                                              secrets_file=self.config.get("secrets_file"))
+                                              secrets_file=self.config.get("secrets_file"),
+                                              network_file=self.config.get("network_file"))
         out = Path(out).resolve()
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
@@ -2243,13 +2256,14 @@ class AgentProviders:
     def art_diagnose(self, prompt: str, cwd: Path, out: Path, timeout: float, *, session_id: str) -> dict:
         """Fork the production conversation for diagnosis without editing it or the workspace."""
         cwd, out = Path(cwd).absolute(), Path(out).absolute()
-        directories, binding = _claude_art_diagnosis_context(self.config, cwd, out, session_id)
+        directories, binding, task = _claude_art_diagnosis_context(self.config, cwd, out, session_id)
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
         settings = dict(self.config.get("claude", {}))
-        settings.update(model=ART_CODING_MODEL, reasoning_effort=ART_CODING_REASONING_EFFORT)
+        settings.update(model=task["coding_model"], reasoning_effort=task["coding_reasoning_effort"])
         environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
-                                              secrets_file=self.config.get("secrets_file"))
+                                              secrets_file=self.config.get("secrets_file"),
+                                              network_file=self.config.get("network_file"))
         prompt += (
             "\n这是原制作会话的只读诊断分支，不能修改文件、执行命令、制作资产、提交或批准验收。"
             "仅结合当前任务证据，说明失败原因及你在现有艺术方向、预算、批次、工具和审批权限内的下一步计划；"
@@ -2268,10 +2282,11 @@ class AgentProviders:
                      "--tools", "Read,Glob,Grep", "--allowedTools", "Read", "Glob", "Grep",
                      "--disallowedTools", "mcp__*", "Bash", "Edit", "Write",
                      "--resume", session_id, "--fork-session",
-                     "--model", ART_CODING_MODEL, "--effort", ART_CODING_REASONING_EFFORT,
+                     "--model", settings["model"], "--effort", settings["reasoning_effort"],
                      "--json-schema", json.dumps(ART_DIAGNOSE_SCHEMA, separators=(",", ":"))])
         self._invoke("art_diagnose", argv, prompt, cwd, out, timeout, environment,
                      requested_session=session_id, diagnosis_binding=binding,
+                     diagnosis_model=settings["model"], diagnosis_reasoning_effort=settings["reasoning_effort"],
                      strict_model_selection=True)
         recovered = self.recover("art_diagnose", out)
         if recovered is None:
@@ -2286,7 +2301,8 @@ class AgentProviders:
         followup_context = _claude_followup_context(self.config, Path(cwd), Path(out), session_id, repair_context)
         art_context = _managed_art_task(self.config, Path(cwd), Path(out), "code")
         if art_context is not None:
-            settings.update(model=ART_CODING_MODEL, reasoning_effort=ART_CODING_REASONING_EFFORT)
+            task = art_context[0]
+            settings.update(model=task["coding_model"], reasoning_effort=task["coding_reasoning_effort"])
         try:
             validate_model_settings(settings, "claude")
         except ValueError as error:
@@ -2326,7 +2342,8 @@ class AgentProviders:
             )
         prompt += "\n交付摘要只写变更要点、提交号、验证结果及证据路径。不要粘贴源码或完整命令输出。"
         environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
-                                              secrets_file=self.config.get("secrets_file"))
+                                              secrets_file=self.config.get("secrets_file"),
+                                              network_file=self.config.get("network_file"))
         working_directory = Path(cwd).resolve()
         external = [path for path in dict.fromkeys(path.resolve() for path in directories)
                     if not path.is_relative_to(working_directory)]
@@ -2381,6 +2398,7 @@ class AgentProviders:
                 coding_model: str | None = None, coding_reasoning_effort: str | None = None,
                 strict_model_selection: bool = False, review_read_only_dirs: list[str] | None = None,
                 diagnosis_binding: dict | None = None,
+                diagnosis_model: str | None = None, diagnosis_reasoning_effort: str | None = None,
                 repair_binding: dict | None = None,
                 followup_binding: dict | None = None,
                 codex_auth_mode: str | None = None,
@@ -2421,8 +2439,8 @@ class AgentProviders:
         if diagnostic:
             if diagnosis_binding is None:
                 raise ProviderError("Art diagnosis is missing its managed operation binding")
-            receipt_fields.update(diagnosis_provider="claude", diagnosis_model=ART_CODING_MODEL,
-                                  diagnosis_reasoning_effort=ART_CODING_REASONING_EFFORT, **diagnosis_binding)
+            receipt_fields.update(diagnosis_provider="claude", diagnosis_model=diagnosis_model,
+                                  diagnosis_reasoning_effort=diagnosis_reasoning_effort, **diagnosis_binding)
         protocol_session = None if diagnostic else requested_session
         claude = _claude_receipt(kind, receipt_fields)
         if codex_auth_mode is not None:
@@ -2467,8 +2485,8 @@ class AgentProviders:
                   **receipt_fields}
         if diagnostic:
             record["diagnosis_session"] = record["session_id"]
-        selection_model = ART_CODING_MODEL if diagnostic else coding_model
-        selection_effort = ART_CODING_REASONING_EFFORT if diagnostic else coding_reasoning_effort
+        selection_model = diagnosis_model if diagnostic else coding_model
+        selection_effort = diagnosis_reasoning_effort if diagnostic else coding_reasoning_effort
         repair_facts = None
         if diagnostic or (kind == "code" and coding_provider == "claude" and coding_model is not None):
             try:
@@ -2515,7 +2533,7 @@ class AgentProviders:
                                 transient=bool(retry), retry_reason=retry["reason"] if retry else None,
                                 retry_after_seconds=retry.get("retry_after_seconds") if retry else None)
         if strict_model_selection and not record.get("model_selection", {}).get("model_verified"):
-            raise ProviderError("Claude pinned task did not confirm the required Opus 5.5 model in native receipts",
+            raise ProviderError("Claude pinned task did not confirm the required model in native receipts",
                                 session_id=error_session)
         if repair_binding is not None and (repair_facts is None or repair_facts[2] or
                 (repair_facts[3] and repair_facts[3].get("status") == "rejected")):
@@ -2546,12 +2564,14 @@ class AgentProviders:
                 if not (out / "stdout.log").is_file():
                     return None
                 if (record.get("diagnosis_provider") != "claude" or
-                        record.get("diagnosis_model") != ART_CODING_MODEL or
+                        record.get("diagnosis_model") not in CLAUDE_PINNED_MODELS or
                         record.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT or
                         record.get("strict_model_selection") is not True):
                     raise ProviderError("Saved art diagnosis does not require the pinned Claude model")
-                _, binding = _claude_art_diagnosis_context(self.config, Path(record["workspace"]), out,
-                                                           record.get("requested_session"))
+                _, binding, task = _claude_art_diagnosis_context(self.config, Path(record["workspace"]), out,
+                                                                 record.get("requested_session"))
+                if record["diagnosis_model"] != task["coding_model"]:
+                    raise ProviderError("Saved art diagnosis model differs from its pinned task")
                 if any(record.get(key) != value for key, value in binding.items()):
                     raise ProviderError("Saved art diagnosis differs from its current operation binding")
                 branch = _claude_receipt_session(record)
@@ -2562,7 +2582,7 @@ class AgentProviders:
                     return None
                 if _json_file(out / "schema.json") != ART_DIAGNOSE_SCHEMA:
                     raise ProviderError("Saved art diagnosis has an invalid output schema")
-                selection = _claude_model_evidence(out / "stdout.log", branch, ART_CODING_MODEL,
+                selection = _claude_model_evidence(out / "stdout.log", branch, record["diagnosis_model"],
                                                     ART_CODING_REASONING_EFFORT)
                 if not selection["model_verified"] or record.get("model_selection") != selection:
                     raise ProviderError("Saved art diagnosis does not verify the required model")

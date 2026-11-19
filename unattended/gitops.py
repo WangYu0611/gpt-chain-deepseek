@@ -30,8 +30,13 @@ def deadline(seconds):
         _DEADLINE.reset(token)
 
 
-def git(root: Path, *args: str, timeout: float = 60) -> str:
+def git(root: Path, *args: str, timeout: float = 60, network_config: dict | None = None) -> str:
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="never", GIT_PAGER="cat")
+    if network_config is not None:
+        from .network import proxy_environment
+        env.update(proxy_environment(config_path=network_config.get("config_path"),
+                                     secrets_file=network_config.get("secrets_file"),
+                                     network_file=network_config.get("network_file")))
     limit = _DEADLINE.get()
     remaining = limit - time.monotonic() if limit is not None else timeout
     if remaining <= 0:
@@ -257,11 +262,11 @@ def publish(work: Path, config: dict, expected_head: str):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", remote):
         raise ValueError("remote 必须是 Git remote 名称。")
     target = "refs/heads/" + branch
-    before = git(work, "ls-remote", "--refs", remote, target, timeout=60)
+    before = git(work, "ls-remote", "--refs", remote, target, timeout=60, network_config=config)
     if before and before.split()[0] == expected_head:
         return {"head_sha": expected_head, "remote": remote, "branch": branch, "already_published": True}
-    git(work, "push", "--porcelain", remote, expected_head + ":" + target, timeout=300)
-    after = git(work, "ls-remote", "--refs", remote, target, timeout=60)
+    git(work, "push", "--porcelain", remote, expected_head + ":" + target, timeout=300, network_config=config)
+    after = git(work, "ls-remote", "--refs", remote, target, timeout=60, network_config=config)
     if not after or after.split()[0] != expected_head:
         raise RuntimeError("推送后无法核对远端提交。")
     return {"head_sha": expected_head, "remote": remote, "branch": branch, "already_published": False}
