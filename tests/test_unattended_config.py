@@ -42,6 +42,21 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded["dsh"]["patches"], [str(self.path.parent / "account.yml")])
         self.assertEqual(loaded["config_path"], str(self.path))
 
+    def test_subscription_coding_setting_applies_only_to_subscription_coding(self):
+        self.value.update(coding_provider="claude", planning_provider="claude", claude={
+            "model": "claude-fable-5-2", "reasoning_effort": "high",
+            "subscription_coding": {"model": "claude-opus-5-5", "reasoning_effort": "high"},
+        })
+        loaded = config.load_config(self.save())
+        self.assertEqual(config.claude_coding_settings(loaded)["model"], "claude-opus-5-5")
+        self.assertEqual(loaded["claude"]["model"], "claude-fable-5-2")
+        self.value["claude"]["auth_mode"] = "api_key"
+        loaded = config.load_config(self.save())
+        self.assertEqual(config.claude_coding_settings(loaded)["model"], "claude-fable-5-2")
+        self.value["claude"]["subscription_coding"]["reasoning_effort"] = "invalid"
+        with self.assertRaisesRegex(ValueError, "reasoning_effort"):
+            config.load_config(self.save())
+
     def test_shared_secrets_resolve_against_config_and_stay_outside_model_workspaces(self):
         shared = self.root / "private" / "secrets.local.json"
         shared.parent.mkdir()

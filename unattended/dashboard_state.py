@@ -13,7 +13,7 @@ import stat
 from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
-from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, load_config
+from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, load_config
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
 TAIL_BYTES = 128 * 1024
@@ -876,12 +876,15 @@ def _workflow(snapshot, config, state, operation, directory=None):
     roles = [
         ("routine_planner", "常规任务规划", "明确本轮任务范围、验收条件和核心测试，判断是否涉及关键系统。", config.get(planner, {})),
         ("critical_planner", "关键系统规划", "核对关键系统边界、兼容性和跨模块行为，形成最终任务书。", {"model": claude.get("critical_plan_model"), "reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort"))}),
-        ("developer", "功能开发", "按任务书修改代码、运行提交前验证并提交本地变更。", config.get(coder, {})),
+        ("developer", "功能开发", "按任务书修改代码、运行提交前验证并提交本地变更。",
+         claude_coding_settings(config) if coder == "claude" else config.get(coder, {})),
         ("checks", "构建与测试", "在固定提交上独立运行构建、核心测试及阶段检查。", {}),
         ("reviewer", "独立审核", "由 Codex 核对实际代码和证据，决定通过、返工或阻塞。", codex),
         ("publisher", "交付与发布", "登记通过的本地任务，阶段独立验收通过后按策略发布。", {}),
     ]
     role_map = {identity: settings for identity, _, _, settings in roles}
+    if task.get("kind") == "art" and task.get("coding_model") in CLAUDE_PINNED_MODELS:
+        role_map["developer"] = {"model": task["coding_model"], "reasoning_effort": task.get("coding_reasoning_effort")}
     user_repair = (snapshot.get("task") or {}).get("user_repair")
     user_followup = (snapshot.get("task") or {}).get("user_followup")
     if user_repair:
@@ -1031,6 +1034,14 @@ def _workflow(snapshot, config, state, operation, directory=None):
                             "route": route, "route_reason": _clean(task.get("planning_reason") or (selection.get("critical_candidate") or {}).get("planning_reason"), 600),
                             "rework": {"active": rework_active, "count": max(0, reworks), "reason": _clean(task.get("feedback"), 600)}}
     snapshot["modules"] = modules
+    if (phase == "CODE" and coder == "claude" and task.get("kind") != "art" and
+            claude.get("subscription_coding")):
+        developer = next(node for node in nodes if node["id"] == "code")
+        settings = role_map["developer"]
+        recorded = developer["model_source"] == "recorded"
+        snapshot["models"].setdefault("claude", {"name": "Claude Code"}).update(
+            model=developer["model"] if recorded else _clean(settings.get("model"), 120) or "配置默认模型",
+            effort=(developer["effort"] if recorded else _clean(settings.get("reasoning_effort"), 40)) or "默认")
 
 
 def _full_flow_context(config, state=None):

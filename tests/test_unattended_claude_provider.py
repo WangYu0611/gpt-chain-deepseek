@@ -53,6 +53,20 @@ class ClaudeCodeTests(unittest.TestCase):
             "requested_session": requested_session, "timed_out": False, "output_limit_exceeded": False,
         }), encoding="utf-8")
 
+    @patch("unattended.providers.claude_subscription_ready", return_value=True)
+    @patch("unattended.providers.run_process")
+    def test_subscription_coding_model_is_used_when_resuming_the_same_session(self, launch, auth):
+        self.settings.update(model="claude-fable-5-2", reasoning_effort="medium",
+                             subscription_coding={"model": "claude-opus-5-5", "reasoning_effort": "high"})
+        launch.side_effect = lambda *args, **kwargs: self.capture(events())
+        result = self.provider.code("Continue the current task.", self.root, self.out, 120, session_id=SESSION)
+        argv = launch.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5-5")
+        self.assertEqual(argv[argv.index("--effort") + 1], "high")
+        self.assertEqual(argv[argv.index("--resume") + 1], SESSION)
+        self.assertEqual(result["session_id"], SESSION)
+        self.assertEqual(self.settings["model"], "claude-fable-5-2")
+
     def managed_validation(self):
         workspace = self.root / "workspace"
         workspace.mkdir()

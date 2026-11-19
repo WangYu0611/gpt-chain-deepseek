@@ -26,7 +26,7 @@ from github_harness_lab.lab_harness.dsh import parse_events
 from github_harness_lab.lab_harness.dsh_legacy import VERIFIED_VERSION, parse_legacy_events
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import ue_checks
-from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS,
+from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS, claude_coding_settings,
                      validate_art_pipeline_settings, validate_model_settings)
 from .secrets import read_secret, validate_api_base_url
 from .network import proxy_environment
@@ -2494,10 +2494,11 @@ class AgentProviders:
 
     def _claude_code(self, prompt: str, cwd: Path, out: Path, timeout: float,
                      session_id: str | None) -> dict:
-        settings = dict(self.config.get("claude", {}))
         repair_context = _claude_repair_context(self.config, Path(cwd), Path(out), session_id)
         followup_context = _claude_followup_context(self.config, Path(cwd), Path(out), session_id, repair_context)
         art_context = _managed_art_task(self.config, Path(cwd), Path(out), "code")
+        settings = (claude_coding_settings(self.config) if repair_context is None
+                    else dict(self.config.get("claude", {})))
         if art_context is not None:
             task = art_context[0]
             settings.update(model=task["coding_model"], reasoning_effort=task["coding_reasoning_effort"])

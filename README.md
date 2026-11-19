@@ -58,6 +58,8 @@ Codex 和 Claude API 模式优先读取共享文件，缺少密钥时查找进�
 
 Claude 可配置 `subscription_fallback: true`。官方 API 明确返回余额不足时，Claude Code 使用本机已登录的订阅继续，编码任务接续原会话与工作区；规划和只读诊断重新执行对应步骤。模型、思考档位和工具权限按本次任务的配置执行。
 
+在 `claude` 配置下设置 `"subscription_coding": {"model": "claude-opus-5-5", "reasoning_effort": "high"}`，为订阅模式下的常规开发编码指定模型。常规规划使用 `claude.model`，关键规划使用 `claude.critical_plan_model`。
+
 任务、阶段与美术审核支持直接调用 OpenAI Responses API。在 `codex` 配置中设置 `"review_transport": "responses_api"`，并配置 `model`、`reasoning_effort` 和共享密钥文件。审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 响应与工具记录保存在对应运行目录，重启时验证回执后恢复。该模式通过 `CODEX_API_KEY` 调用普通 API，API 错误会记录并按类型重试。
 
 短暂连接中断会在当前请求内有限重试。需要重新启动审核时，系统校验原请求、固定提交与已读取证据，将完成的审核轮次复制到新运行目录后续接。面板显示已完成轮数、续接轮数和最近回执时间。

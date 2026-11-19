@@ -14,7 +14,7 @@ import uuid
 
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from .calendar import WorkCalendar
-from .config import ART_CODING_MODEL, claude_execution_model
+from .config import ART_CODING_MODEL, claude_coding_settings, claude_execution_model
 from . import gitops
 from .providers import (AgentProviders, ProviderError, _responses_api_receipt, codex_result_directory,
                         read_session, validate_output)
@@ -766,8 +766,9 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 raise RuntimeError("Only API review operations can carry a continuation source.")
             op["resume_from"] = str(resume_from)
         if kind == "code" and self.config.get("coding_provider") == "claude":
-            op.update(coding_provider="claude", coding_model=self.config.get("claude", {}).get("model"),
-                      coding_reasoning_effort=self.config.get("claude", {}).get("reasoning_effort"),
+            coding_settings = claude_coding_settings(self.config)
+            op.update(coding_provider="claude", coding_model=coding_settings.get("model"),
+                      coding_reasoning_effort=coding_settings.get("reasoning_effort"),
                       code_base=(state.get("task") or {}).get("code_base"),
                       requested_session_id=(state.get("task") or {}).get("session_id"))
         if kind == "code" and (state.get("task") or {}).get("kind") == "art":
@@ -941,9 +942,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             prompt += (f"用户当前分工：Claude Code（CC）规划任务，{coder}负责编码和本地提交，Codex 负责独立任务验收和阶段验收。\n")
             if self.config["claude"].get("critical_plan_model"):
                 settings = self.config["claude"]
+                coding_model = claude_coding_settings(self.config).get("model", settings["model"])
                 prompt += (f"用户规划分工：{settings['model']} 规划常规任务并判断实际改动范围；"
                            f"关键系统任务和阶段完成提案由 {settings['critical_plan_model']} 完成最终规划，"
-                           f"编码使用 {settings['model']}。\n")
+                           f"编码使用 {coding_model}。\n")
         elif self.config.get("coding_provider") == "claude":
             prompt += "用户当前分工：Codex 只发布任务书与独立验收，Claude Code（CC）负责编码和本地提交。\n"
         if self.config.get("coding_provider") == "claude":

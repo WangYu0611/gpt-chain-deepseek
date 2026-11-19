@@ -24,6 +24,13 @@ def claude_execution_model(config: dict, default: str = ART_CODING_MODEL) -> str
     return settings.get("model", CLAUDE_API_MODEL) if settings.get("auth_mode") == "api_key" else default
 
 
+def claude_coding_settings(config: dict) -> dict:
+    settings = dict(config.get("claude", {}))
+    if settings.get("auth_mode", "subscription") == "subscription":
+        settings.update(settings.get("subscription_coding", {}))
+    return settings
+
+
 def validate_model_settings(settings: dict, role: str) -> None:
     if "model" in settings:
         model = settings["model"]
@@ -304,6 +311,11 @@ def load_config(path: Path) -> dict:
             raise ValueError("claude.auth_mode 必须为 subscription 或 api_key。")
         if type(settings.get("subscription_fallback", False)) is not bool:
             raise ValueError("claude.subscription_fallback 必须为布尔值。")
+        if "subscription_coding" in settings:
+            coding = settings["subscription_coding"]
+            if not isinstance(coding, dict) or set(coding) != {"model", "reasoning_effort"}:
+                raise ValueError("claude.subscription_coding 必须包含 model 和 reasoning_effort。")
+            validate_model_settings(coding, "claude")
         if "critical_plan_reasoning_effort" in settings and "critical_plan_model" not in settings:
             raise ValueError("claude.critical_plan_reasoning_effort 需要配置 critical_plan_model。")
         if "critical_plan_model" in settings:

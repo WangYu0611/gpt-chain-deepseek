@@ -154,6 +154,72 @@ class DashboardWorkflowTests(unittest.TestCase):
             "session_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "model": "claude-opus-5-5"}) + "\n", encoding="utf-8")
         self.assertIsNone(self.modules(self.fixture.snapshot())["developer"]["model"])
 
+    def subscription_coding(self, *, auth_mode="subscription"):
+        self.config["claude"].update(model="claude-fable-5-2", auth_mode=auth_mode,
+            critical_plan_model="claude-fable-5-2", subscription_coding={
+                "model": "claude-opus-5-5", "reasoning_effort": "high"})
+        self.save_config()
+
+    def test_subscription_coding_override_is_displayed_only_for_development(self):
+        self.subscription_coding()
+        task = self.task()
+        task["planning_model"] = "claude-fable-5-2"
+        self.state.update(phase="CODE", operation=None)
+        snapshot = self.fixture.snapshot()
+        developer = self.modules(snapshot)["developer"]
+        self.assertEqual((developer["model"], developer["effort"], developer["model_source"]),
+                         ("claude-opus-5-5", "high", "configured"))
+        self.assertEqual(self.modules(snapshot)["routine_planner"]["model"], "claude-fable-5-2")
+        self.assertEqual(snapshot["models"]["claude"]["model"], "claude-opus-5-5")
+        self.state.update(phase="PLAN", task=None, operation=None)
+        self.assertEqual(self.fixture.snapshot()["models"]["claude"]["model"], "claude-fable-5-2")
+
+    def test_api_coding_display_keeps_general_model_when_subscription_override_exists(self):
+        self.subscription_coding(auth_mode="api_key")
+        self.task()
+        self.state.update(phase="CODE", operation=None)
+        snapshot = self.fixture.snapshot()
+        self.assertEqual(self.modules(snapshot)["developer"]["model"], "claude-fable-5-2")
+        self.assertEqual(snapshot["models"]["claude"]["model"], "claude-fable-5-2")
+
+    def test_existing_native_fable_operation_retains_recorded_model_after_opus_coding_config(self):
+        self.subscription_coding()
+        session = "18d2529d-649c-4ac1-9d45-3c9377291694"
+        self.task()["session_id"] = session
+        self.state["phase"] = "CODE"
+        self.fixture.logs([{"type": "system", "subtype": "init", "session_id": session,
+                            "model": "claude-fable-5-2"}], kind="code")
+        self.state["operation"].update(task_id="TASK-1", coding_provider="claude",
+            coding_model="claude-fable-5-2", coding_reasoning_effort="high")
+        snapshot = self.fixture.snapshot()
+        developer = self.modules(snapshot)["developer"]
+        self.assertEqual((developer["model"], developer["model_source"], developer["configured_model"]),
+                         ("claude-fable-5-2", "recorded", "claude-opus-5-5"))
+        self.assertEqual(snapshot["models"]["claude"]["model"], "claude-fable-5-2")
+
+    def test_art_task_display_keeps_its_pinned_model(self):
+        self.subscription_coding()
+        self.task().update(kind="art", coding_model="claude-fable-5-2", coding_reasoning_effort="high")
+        self.state.update(phase="CODE", operation=None)
+        developer = self.modules(self.fixture.snapshot())["developer"]
+        self.assertEqual((developer["model"], developer["configured_model"]),
+                         ("claude-fable-5-2", "claude-fable-5-2"))
+
+    def test_authorized_repair_display_keeps_profile_model_over_subscription_coding_override(self):
+        from tests import test_unattended_dashboard_user_repair as repair_fixtures
+        repair = repair_fixtures.UserRepairDashboardTests()
+        repair.setUp()
+        self.addCleanup(repair.doCleanups)
+        repair.f.f.config["claude"].update(auth_mode="subscription", subscription_coding={
+            "model": "claude-fable-5-2", "reasoning_effort": "high"})
+        repair.f.f.save_config()
+        repair.f.save()
+        snapshot = repair.snapshot()
+        developer = self.modules(snapshot)["developer"]
+        self.assertEqual((developer["model"], developer["configured_model"], developer["model_source"]),
+                         ("claude-opus-5-5", "claude-opus-5-5", "recorded"))
+        self.assertEqual(snapshot["models"]["claude"]["model"], "claude-opus-5-5")
+
     def test_historical_registration_does_not_complete_current_task_publication(self):
         self.task()
         self.state["phase"] = "CODE"
