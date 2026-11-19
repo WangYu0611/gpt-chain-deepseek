@@ -302,6 +302,8 @@ def load_config(path: Path) -> dict:
         settings = config["claude"]
         if settings.get("auth_mode", "subscription") not in ("subscription", "api_key"):
             raise ValueError("claude.auth_mode 必须为 subscription 或 api_key。")
+        if type(settings.get("subscription_fallback", False)) is not bool:
+            raise ValueError("claude.subscription_fallback 必须为布尔值。")
         if "critical_plan_reasoning_effort" in settings and "critical_plan_model" not in settings:
             raise ValueError("claude.critical_plan_reasoning_effort 需要配置 critical_plan_model。")
         if "critical_plan_model" in settings:

@@ -30,7 +30,7 @@ from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS,
                      validate_art_pipeline_settings, validate_model_settings)
 from .secrets import read_secret, validate_api_base_url
 from .network import proxy_environment
-from .storage import atomic_replace
+from .storage import atomic_replace, write_text
 
 
 PLAN_SCHEMA = {
@@ -130,6 +130,7 @@ _FAILURE_STDERR_LIMIT = 64 * 1024
 _FAILURE_LINE_LIMIT = 64 * 1024
 _DEFAULT_PROVIDER_OUTPUT_LIMIT = 16 * 1024 * 1024
 _CODEX_SUBSCRIPTION_DIR = "codex-subscription"
+_CLAUDE_SUBSCRIPTION_DIR = "claude-subscription"
 _ART_PIPELINE_SCRIPT = Path(__file__).resolve().with_name("art_pipeline.py")
 _CODEX_API_BILLING_CODES = frozenset({
     "credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
@@ -610,7 +611,7 @@ def _claude_notification_suffix(source, session: str) -> None:
         raise ValueError("Incomplete Claude Code notification suffix")
 
 
-def _claude_turn(path: Path, requested_session: str | None) -> tuple[str, dict, list[str], dict | None]:
+def _claude_turn(path: Path, requested_session: str | None, *, allow_native_notifications: bool = False) -> tuple[str, dict, list[str], dict | None]:
     """Read the foreground Claude Code turn and validate any notification suffix."""
     if path.is_symlink():
         raise ValueError("Linked Claude Code output")
@@ -626,6 +627,10 @@ def _claude_turn(path: Path, requested_session: str | None) -> tuple[str, dict, 
             if type(event) is not dict or not isinstance(event.get("type"), str):
                 raise ValueError("Invalid Claude Code event stream")
             if session is None:
+                if (allow_native_notifications and event.get("type") == "system" and
+                        event.get("subtype") in {"task_notification", "task_updated", "background_tasks_changed", "task_started"} and
+                        event.get("session_id") == requested_session):
+                    continue
                 pending_session, initialized = _claude_header(event, pending_session, requested_session)
                 if initialized:
                     session = pending_session
@@ -674,6 +679,106 @@ def _claude_model_evidence(path: Path, requested_session: str | None,
             "reasoning_effort_source": "cli_argument", "observed_model": observed,
             "model_usage_models": models,
             "model_verified": bool(requested_model and observed == requested_model and requested_model in models)}
+
+
+def _claude_file_sha(path: Path) -> str:
+    if path.is_symlink():
+        raise ValueError("Linked Claude fallback evidence")
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def _claude_billing_session(kind: str, out: Path) -> str | None:
+    """Only native first-party billing metadata authorizes the saved auth fallback."""
+    try:
+        record = _json_file(out / "process.json")
+        limit = record.get("max_output_bytes", _DEFAULT_PROVIDER_OUTPUT_LIMIT)
+        if (record.get("kind") != kind or not _claude_receipt(kind, record) or
+                record.get("claude_auth_mode") != "api_key" or record.get("claude_subscription_fallback") is not True or
+                record.get("claude_api_provider") != "firstParty" or type(record.get("exit_code")) is not int or
+                record["exit_code"] not in (0, 1) or record.get("timed_out") is not False or
+                record.get("output_limit_exceeded") is not False or record.get("launch_or_capture_failed") or
+                type(limit) is not int or not 1024 <= limit <= 256 * 1024 * 1024 or
+                (out / "stdout.log").stat().st_size > limit):
+            return None
+        session, terminal, errors, _ = _claude_turn(out / "stdout.log", _claude_receipt_session(record),
+                                                   allow_native_notifications=record.get("native_protocol") == "full_flow_native_v1")
+        if record.get("native_protocol") == "full_flow_native_v1":
+            try:
+                from .full_flow_native import parse_full_flow_native
+                native = parse_full_flow_native(out / "stdout.log", record.get("requested_session"),
+                                                record.get("coding_model"), record.get("coding_reasoning_effort"))
+            except ValueError:
+                pass  # A first failed turn has no completed answer for this parser.
+            else:
+                session, _, native_errors, _, selection = native
+                if not selection["model_verified"] or any(code not in {"billing_error", "native_terminal_error"}
+                                                           for code in native_errors):
+                    return None
+                last = selection["native_turns"][-1]
+                errors = []
+                with (out / "stdout.log").open(encoding="utf-8-sig") as stream:
+                    for number, line in enumerate(stream, 1):
+                        if not last["init_line"] <= number <= last["result_line"] or not line.strip():
+                            continue
+                        event = _strict_json(line)
+                        if event.get("type") == "assistant" and event.get("parent_tool_use_id") is None and "error" in event:
+                            errors.append(event["error"])
+                        if number == last["result_line"]:
+                            terminal = event
+        if (not errors or any(code != "billing_error" for code in errors) or terminal.get("is_error") is not True or
+                terminal.get("api_error_origin") != "first_party" or terminal.get("terminal_reason") != "api_error" or
+                terminal.get("api_error_status") not in (None, 400) or
+                terminal.get("subtype") not in {"success", "error_during_execution"} or
+                terminal.get("result") != "Credit balance is too low"):
+            return None
+        return session
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        return None
+
+
+def claude_result_directory(kind: str, out: Path) -> Path:
+    out = Path(out).resolve()
+    child = out / _CLAUDE_SUBSCRIPTION_DIR
+    if not child.exists():
+        return out
+    if child.is_symlink() or _reparse(child):
+        raise ValueError("Linked Claude fallback directory")
+    session = _claude_billing_session(kind, out)
+    if session is None:
+        raise ValueError("Claude fallback lacks its failed native API billing receipt")
+    if not (child / "process.json").exists():
+        return child
+    record = _json_file(child / "process.json")
+    expected = {"kind": kind, "session_id": session, "process_sha256": _claude_file_sha(out / "process.json"),
+                "stdout_sha256": _claude_file_sha(out / "stdout.log")}
+    primary = _json_file(out / "process.json")
+    model_field = {"plan": "planning_model", "code": "coding_model", "art_diagnose": "diagnosis_model"}.get(kind)
+    effort_field = {"plan": "planning_reasoning_effort", "code": "coding_reasoning_effort",
+                    "art_diagnose": "diagnosis_reasoning_effort"}.get(kind)
+    if (record.get("kind") != kind or record.get("claude_auth_mode") != "subscription" or
+            record.get("claude_fallback_source") != expected or not _claude_receipt(kind, record) or
+            model_field is None or record.get(model_field) != primary.get(model_field) or
+            record.get(effort_field) != primary.get(effort_field) or
+            record.get("claude_capture_directory") != str(child) or
+            (kind == "code" and record.get("requested_session") != session)):
+        raise ValueError("Claude subscription receipt differs from its authorized API attempt")
+    return child
+
+
+def _claude_managed_head(config: dict, cwd: Path, out: Path) -> str | None:
+    if not config.get("runtime_dir"):
+        return None
+    runtime = Path(config["runtime_dir"]).resolve()
+    if (cwd.resolve() != runtime / "workspace" or out.resolve().parent != runtime / "runs" or
+            not (cwd / ".git").exists()):
+        return None
+    state = _json_file(runtime / "state.json")
+    operation = state.get("operation") or {}
+    if operation.get("kind") != "code" or Path(operation.get("output_dir", "")).resolve() != out.resolve():
+        return None
+    from . import gitops
+    return gitops.head(cwd)
 
 
 def _claude_retry(out: Path, record: dict) -> dict | None:
@@ -760,8 +865,9 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
             return None
         from . import api_review
         return api_review.classify_failure(out)
-    out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out)
     try:
+        out = claude_result_directory(kind, Path(out))
+        out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out)
         path = out / "process.json"
         if path.is_symlink():
             return None
@@ -1007,6 +1113,10 @@ def read_session(out: Path, *, requested_session: str | None = None) -> str | No
     """Read only the opening session identity, including after a killed run."""
     pending_session = None
     try:
+        out = Path(out)
+        if (out / _CLAUDE_SUBSCRIPTION_DIR).exists():
+            record = _json_file(out / "process.json", limit=16384)
+            out = claude_result_directory(record.get("kind"), out)
         with (Path(out) / "stdout.log").open(encoding="utf-8-sig") as source:
             for _ in range(5):
                 line = source.readline(65536)
@@ -2206,6 +2316,79 @@ class AgentProviders:
         _atomic_json(out / "result.json", recovered)
         return recovered
 
+    def _claude_invoke(self, kind: str, argv: list[str], prompt: str, cwd: Path, out: Path,
+                       timeout: float, environment: dict[str, str], settings: dict, **options) -> None:
+        mode = settings.get("auth_mode", "subscription")
+        fallback = mode == "api_key" and settings.get("subscription_fallback") is True
+        endpoint = urlsplit(environment.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
+        origin = "firstParty" if (endpoint.scheme == "https" and endpoint.netloc == "api.anthropic.com" and
+                                   endpoint.path.rstrip("/") in {"", "/v1"}) else "custom"
+        metadata = {"claude_auth_mode": mode, "claude_subscription_fallback": fallback,
+                    "claude_api_provider": origin if mode == "api_key" else None}
+        if not fallback:
+            self._invoke(kind, argv, prompt, cwd, out, timeout, environment, **options, **metadata)
+            return
+        deadline = time.monotonic() + timeout
+        starting_head = _claude_managed_head(self.config, cwd, out) if kind == "code" else None
+        failure = None
+        try:
+            self._invoke(kind, argv, prompt, cwd, out, timeout, environment, **options, **metadata)
+        except ProviderError as error:
+            failure = error
+        if self.recover(kind, out) is not None:
+            return
+        session = _claude_billing_session(kind, out)
+        if session is None:
+            if failure is not None:
+                raise failure
+            return
+        if starting_head is not None:
+            from . import gitops
+            try:
+                changed = gitops.head(cwd) != starting_head
+            except (OSError, RuntimeError):
+                changed = True
+            if changed:
+                if failure is not None:
+                    raise failure
+                raise ProviderError("Claude API turn changed the candidate; controller reconciliation is required", session_id=session)
+        subscription = dict(settings, auth_mode="subscription")
+        child_environment = _claude_authentication(subscription, cwd, config_path=self.config.get("config_path"),
+                                                    secrets_file=self.config.get("secrets_file"),
+                                                    network_file=self.config.get("network_file"))
+        if "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" not in environment:
+            child_environment.pop("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", None)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("Claude exhausted its time budget before subscription fallback", interrupted=True)
+        child = out / _CLAUDE_SUBSCRIPTION_DIR
+        child.mkdir(parents=True, exist_ok=True)
+        for name in ("schema.json", "ue-mcp-config.json"):
+            source = out / name
+            if source.exists():
+                _json_file(source)
+                write_text(child / name, source.read_text(encoding="utf-8"))
+        child_argv = list(argv)
+        index = child_argv.index("--settings") + 1
+        policy = _strict_json(child_argv[index])
+        policy["forceLoginMethod"] = "claudeai"
+        child_argv[index] = json.dumps(policy, separators=(",", ":"))
+        child_options = dict(options)
+        if settings.get("model"):
+            child_options["strict_model_selection"] = True
+        if kind == "code":
+            if "--resume" in child_argv:
+                child_argv[child_argv.index("--resume") + 1] = session
+            else:
+                child_argv.extend(["--resume", session])
+            child_options["requested_session"] = session
+            prompt += ("\nAPI 余额不足，现使用已授权的原生订阅继续同一任务与同一会话。"
+                       "先核对已有工具执行、当前工作区与已完成步骤，从中断点继续现有工作。")
+        source = {"kind": kind, "session_id": session, "process_sha256": _claude_file_sha(out / "process.json"),
+                  "stdout_sha256": _claude_file_sha(out / "stdout.log")}
+        self._invoke(kind, child_argv, prompt, cwd, child, remaining, child_environment, **child_options,
+                     claude_auth_mode="subscription", claude_fallback_source=source)
+
     def _claude_plan(self, prompt: str, cwd: Path, out: Path, timeout: float, *,
                      model: str | None = None, reasoning_effort: str | None = None,
                      tiered: bool | None = None) -> dict:
@@ -2259,7 +2442,7 @@ class AgentProviders:
             argv.extend(["--model", settings["model"]])
         if settings.get("reasoning_effort"):
             argv.extend(["--effort", settings["reasoning_effort"]])
-        self._invoke("plan", argv, prompt, Path(cwd), out, timeout, environment,
+        self._claude_invoke("plan", argv, prompt, Path(cwd), out, timeout, environment, settings,
                      planning_provider="claude", planning_model=settings.get("model"),
                      planning_reasoning_effort=settings.get("reasoning_effort"))
         recovered = self.recover("plan", out)
@@ -2299,7 +2482,7 @@ class AgentProviders:
                      "--resume", session_id, "--fork-session",
                      "--model", settings["model"], "--effort", settings["reasoning_effort"],
                      "--json-schema", json.dumps(ART_DIAGNOSE_SCHEMA, separators=(",", ":"))])
-        self._invoke("art_diagnose", argv, prompt, cwd, out, timeout, environment,
+        self._claude_invoke("art_diagnose", argv, prompt, cwd, out, timeout, environment, settings,
                      requested_session=session_id, diagnosis_binding=binding,
                      diagnosis_model=settings["model"], diagnosis_reasoning_effort=settings["reasoning_effort"],
                      strict_model_selection=True)
@@ -2394,7 +2577,7 @@ class AgentProviders:
         out.mkdir(parents=True, exist_ok=True)
         if repair_context is not None:
             environment.pop("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", None)
-        self._invoke("code", argv, prompt, Path(cwd), out, timeout, environment,
+        self._claude_invoke("code", argv, prompt, Path(cwd), out, timeout, environment, settings,
                      requested_session=session_id, coding_provider="claude",
                      coding_model=settings.get("model"), coding_reasoning_effort=settings.get("reasoning_effort"),
                      strict_model_selection=art_context is not None or repair_context is not None,
@@ -2417,7 +2600,9 @@ class AgentProviders:
                 repair_binding: dict | None = None,
                 followup_binding: dict | None = None,
                 codex_auth_mode: str | None = None,
-                codex_subscription_fallback: bool = False) -> None:
+                codex_subscription_fallback: bool = False,
+                claude_auth_mode: str | None = None, claude_subscription_fallback: bool = False,
+                claude_api_provider: str | None = None, claude_fallback_source: dict | None = None) -> None:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ProviderError("A nonempty provider prompt is required")
         # A reused invocation directory must never re-run an external action.
@@ -2427,6 +2612,13 @@ class AgentProviders:
                                                 "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
                    if environment.get(key)]
         receipt_fields = {"coding_provider": coding_provider} if coding_provider else {}
+        if claude_auth_mode is not None:
+            receipt_fields.update(claude_auth_mode=claude_auth_mode, claude_subscription_fallback=claude_subscription_fallback)
+        if claude_api_provider is not None:
+            receipt_fields["claude_api_provider"] = claude_api_provider
+        if claude_fallback_source is not None:
+            receipt_fields["claude_fallback_source"] = claude_fallback_source
+            receipt_fields["claude_capture_directory"] = str(out.resolve())
         if coding_model is not None:
             receipt_fields["coding_model"] = coding_model
         if coding_reasoning_effort is not None:
@@ -2502,8 +2694,11 @@ class AgentProviders:
             record["diagnosis_session"] = record["session_id"]
         selection_model = diagnosis_model if diagnostic else coding_model
         selection_effort = diagnosis_reasoning_effort if diagnostic else coding_reasoning_effort
+        fallback_plan = kind == "plan" and planning_provider == "claude" and claude_fallback_source is not None
+        if fallback_plan:
+            selection_model, selection_effort = planning_model, planning_reasoning_effort
         repair_facts = None
-        if diagnostic or (kind == "code" and coding_provider == "claude" and coding_model is not None):
+        if diagnostic or fallback_plan or (kind == "code" and coding_provider == "claude" and coding_model is not None):
             try:
                 if repair_binding is not None:
                     repair_facts = _claude_repair_native(out, record)
@@ -2558,6 +2753,18 @@ class AgentProviders:
             raise ProviderError("Claude UE follow-up contains invalid native MCP evidence", session_id=error_session) from followup_error
 
     def recover(self, kind: str, out: Path) -> dict | None:
+        managed_out = Path(out).resolve()
+        try:
+            selected = claude_result_directory(kind, managed_out)
+        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+            raise ProviderError("Saved Claude fallback evidence is invalid") from error
+        result = self._recover(kind, selected, managed_out=managed_out)
+        if result is not None and selected != managed_out and (managed_out / "result.json").exists():
+            if _json_file(managed_out / "result.json") != result:
+                raise ProviderError("Saved Claude fallback result differs from its native receipt")
+        return result
+
+    def _recover(self, kind: str, out: Path, *, managed_out: Path) -> dict | None:
         """Validate existing process/protocol artifacts without issuing a request."""
         direct = _responses_api_receipt(out)
         if direct is not None:
@@ -2583,7 +2790,7 @@ class AgentProviders:
                         record.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT or
                         record.get("strict_model_selection") is not True):
                     raise ProviderError("Saved art diagnosis does not require the pinned Claude model")
-                _, binding, task = _claude_art_diagnosis_context(self.config, Path(record["workspace"]), out,
+                _, binding, task = _claude_art_diagnosis_context(self.config, Path(record["workspace"]), managed_out,
                                                                  record.get("requested_session"))
                 if record["diagnosis_model"] != task["coding_model"]:
                     raise ProviderError("Saved art diagnosis model differs from its pinned task")
@@ -2619,6 +2826,11 @@ class AgentProviders:
                 _, terminal, _, _ = _claude_turn(out / "stdout.log", record.get("requested_session"))
                 if terminal.get("subtype") != "success" or terminal["is_error"]:
                     return None
+                if record.get("claude_fallback_source") is not None and record.get("planning_model"):
+                    selection = _claude_model_evidence(out / "stdout.log", record.get("requested_session"),
+                                                       record["planning_model"], record.get("planning_reasoning_effort"))
+                    if not selection["model_verified"] or record.get("model_selection") != selection:
+                        raise ProviderError("Saved Claude subscription plan does not verify its requested model")
                 schema = _json_file(out / "schema.json")
                 if schema not in (PLAN_SCHEMA, PLAN_WITH_CORE_TESTS_SCHEMA,
                                    TIERED_PLAN_SCHEMA, TIERED_PLAN_WITH_CORE_TESTS_SCHEMA,
@@ -2640,7 +2852,7 @@ class AgentProviders:
                     return None
                 if record.get("coding_provider") == "claude":
                     if record.get("native_protocol") is not None or record.get("user_repair_profile") is not None:
-                        context = _claude_repair_context(self.config, Path(record["workspace"]), out,
+                        context = _claude_repair_context(self.config, Path(record["workspace"]), managed_out,
                                                         record.get("requested_session"))
                         if context is None or any(record.get(key) != value for key, value in context[2].items()):
                             raise ProviderError("Saved repair receipt differs from its managed operation")
@@ -2657,7 +2869,7 @@ class AgentProviders:
                         result = {"session_id": session, "text": terminal["result"], "completed": True,
                                   "model_selection": selection}
                         if record.get("user_followup_profile") is not None or self.config.get("_user_followup_profile") is not None:
-                            followup = _claude_followup_context(self.config, Path(record["workspace"]), out,
+                            followup = _claude_followup_context(self.config, Path(record["workspace"]), managed_out,
                                                               record.get("requested_session"), context)
                             if followup is None or any(record.get(key) != value for key, value in followup.items()):
                                 raise ProviderError("Saved UE follow-up differs from the authorized turn")

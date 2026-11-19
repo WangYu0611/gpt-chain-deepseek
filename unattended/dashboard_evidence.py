@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 from .config import load_config
 from .dashboard_art import worker_config, _state as art_state, _package
-from .dashboard_state import _clean, _confined, _object, _claude_event, _codex_route, _iso
+from .dashboard_state import _clean, _confined, _object, _claude_event, _claude_directory, _codex_route, _iso
 from .dashboard_flows import NODE_IDS
 
 MAX_TEXT = 64 * 1024
@@ -120,8 +120,13 @@ def _provider_files(evidence, runtime, directory, *, title="当前操作"):
         raise ValueError("模型操作目录不匹配")
     kind = directory.name.split("-", 1)[0]
     route, selected = _codex_route(runtime, directory, kind) if kind in {"plan", "review"} else (None, directory)
+    subscription = "Codex"
+    if selected == directory and kind in {"plan", "code", "art_diagnose"}:
+        selected = _claude_directory(runtime, directory, kind)
+        subscription = "Claude Code"
     attempts = [(directory, title)] if selected == directory else [
-        (directory, title + " · API 首次尝试（额度失败）"), (selected, title + " · Codex 订阅尝试")]
+        (directory, title + " · API 首次尝试（额度失败）"),
+        (selected, title + " · " + subscription + (" 订阅续接" if subscription == "Claude Code" else " 订阅尝试"))]
     for attempt, label in attempts:
         for name in ("stdout.log", "stderr.log"):
             # Provider stdout is event-label projection only, never native chat.
@@ -132,7 +137,7 @@ def _provider_files(evidence, runtime, directory, *, title="当前操作"):
             keys = ("kind", "exit_code", "timed_out", "output_limit_exceeded", "launch_or_capture_failed", "launch_error",
                     "coding_provider", "coding_model", "coding_reasoning_effort", "planning_provider", "planning_model",
                     "planning_reasoning_effort", "diagnosis_provider", "diagnosis_model", "diagnosis_reasoning_effort",
-                    "model_selection", "retry_reason", "transient", "codex_auth_mode")
+                    "model_selection", "retry_reason", "transient", "codex_auth_mode", "claude_auth_mode")
             evidence.virtual(label + " · 执行回执", {key: process[key] for key in keys if key in process})
 
 
@@ -192,6 +197,7 @@ def _replanning_files(evidence, runtime, state, task, head, operation):
                         "scope": "这是先前版本的审核；当前工作区改动仍需独立检查与审核。",
                         "decision": review.get("decision"), "summary": review.get("summary"), "feedback": review.get("feedback")})
         _provider_files(evidence, runtime, directory, title="当前 Claude 只读修复规划")
+        directory = _claude_directory(runtime, directory, "plan")
         result = _replanning_result(_object(_confined(runtime, directory / "result.json"), missing={}, maximum=256 * 1024))
         if result:
             evidence.virtual("本轮重新分析修复计划（仍需开发、检查与审核）", {
@@ -242,10 +248,12 @@ def _diagnosis_operation_files(evidence, runtime, op, task, head):
     directory = _confined(runtime, Path(op["output_dir"]))
     if directory.parent != runtime / "runs" or not re.fullmatch(r"art_diagnose-[a-f0-9]{32}", directory.name):
         raise ValueError("自主诊断操作目录不匹配")
+    logical = directory
+    directory = _claude_directory(runtime, logical, "art_diagnose")
     receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=65536)
     if receipt and (receipt.get("kind") != "art_diagnose" or receipt.get("task_id") != task.get("id") or receipt.get("head_sha") != head):
         raise ValueError("自主诊断执行回执不属于当前任务或 HEAD")
-    _provider_files(evidence, runtime, directory, title="当前 Claude 只读诊断分支")
+    _provider_files(evidence, runtime, logical, title="当前 Claude 只读诊断分支")
     result = _diagnosis_result(_object(_confined(runtime, directory / "result.json"), missing={}, maximum=256 * 1024), head)
     if result:
         pending = task.get("art_diagnosis") or {}
@@ -278,7 +286,8 @@ def _diagnosis_history_files(evidence, runtime, task, current_op):
         directory = _confined(runtime, Path(raw))
         if directory.parent != runtime / "runs" or not re.fullmatch(r"art_diagnose-[a-f0-9]{32}", directory.name):
             raise ValueError("历史诊断操作目录不匹配")
-        receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=65536)
+        selected = _claude_directory(runtime, directory, "art_diagnose")
+        receipt = _object(_confined(runtime, selected / "process.json"), missing={}, maximum=65536)
         if (receipt.get("kind") != "art_diagnose" or receipt.get("task_id") != task.get("id") or
                 receipt.get("head_sha") != result["head_sha"]):
             continue
@@ -507,12 +516,14 @@ def _user_followup_files(evidence, runtime, task, operation, node):
             directory = _confined(runtime, Path(operation.get("output_dir", "")))
             if directory.parent != runtime / "runs" or not re.fullmatch(r"code-[a-f0-9]{32}", directory.name):
                 raise ValueError("MCP操作目录不匹配")
+            logical = directory
+            directory = _claude_directory(runtime, logical, "code")
             process = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=256 * 1024)
             proof_path = _confined(runtime, directory / "ue-mcp-evidence.json")
             proof = _object(proof_path, missing={}, maximum=1024 * 1024)
             selected = process.get("user_followup_profile") or {}
             if (proof and process.get("task_id") == task["id"] and process.get("head_sha") == operation.get("head_sha") and
-                    process.get("output_dir") == str(directory) and selected.get("id") == profile["id"] and
+                    process.get("output_dir") == str(logical) and selected.get("id") == profile["id"] and
                     selected.get("request_sha256") == profile["request_sha256"] and process.get("user_followup_turn") == operation.get("user_followup_turn") and
                     process.get("user_followup") == proof and SHA.fullmatch(str((proof.get("evidence") or {}).get("raw_stdout_sha256") or ""))):
                 stdout = _confined(runtime, directory / "stdout.log")

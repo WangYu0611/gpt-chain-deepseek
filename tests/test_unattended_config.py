@@ -89,6 +89,17 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "claude.auth_mode"):
             config.load_config(self.save())
 
+    def test_claude_subscription_fallback_is_boolean_and_persists_across_auth_modes(self):
+        self.value.update(planning_provider="claude", claude={"command": ["claude.exe"], "subscription_fallback": True})
+        for mode in ("api_key", "subscription"):
+            self.value["claude"]["auth_mode"] = mode
+            with self.subTest(mode=mode):
+                self.assertTrue(config.load_config(self.save())["claude"]["subscription_fallback"])
+        for value in (1, "true", None):
+            self.value["claude"]["subscription_fallback"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "claude.subscription_fallback"):
+                config.load_config(self.save())
+
     def test_api_execution_model_uses_configuration_and_native_keeps_authorized_default(self):
         configured = {"claude": {"auth_mode": "api_key", "model": "claude-fable-5-2"}}
         self.assertEqual(config.claude_execution_model(configured), "claude-fable-5-2")

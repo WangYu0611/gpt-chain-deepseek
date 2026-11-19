@@ -14,7 +14,7 @@ from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
 from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, load_config
-from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed
+from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
 TAIL_BYTES = 128 * 1024
 MAX_ACTIVITY = 40
@@ -326,6 +326,13 @@ def _codex_route(runtime, directory, kind):
     return "api_key", directory
 
 
+def _claude_directory(runtime, directory, kind):
+    """Resolve authenticated captures without changing the logical operation."""
+    logical = _confined(runtime, directory)
+    selected = claude_result_directory(kind, logical)
+    return logical if selected == logical else _confined(logical, selected)
+
+
 def _api_review_progress(runtime, directory, operation):
     """Project fixed receipt counters for the currently owned API review."""
     try:
@@ -439,9 +446,13 @@ def _native_code_active(runtime, task, operation, directory):
             operation.get("task_id") != task.get("id") or not _iso(operation.get("started_at")) or directory is None):
         return False
     try:
-        directory = _confined(runtime, directory)
-        if directory.parent != runtime / "runs" or not re.fullmatch(r"code-[a-f0-9]{32}", directory.name):
+        logical = _operation_directory(runtime, operation)
+        if logical is None or logical.parent != runtime / "runs" or not re.fullmatch(r"code-[a-f0-9]{32}", logical.name):
             return False
+        selected = _claude_directory(runtime, logical, "code")
+        if _confined(runtime, directory) not in (logical, selected):
+            return False
+        directory = selected
         head = operation.get("head_sha")
         if not isinstance(head, str) or not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", head):
             return False
@@ -515,6 +526,8 @@ def _task_session(runtime, task, operation, phase, coding_provider):
         return None, owner
     directory = _confined(runtime, Path(raw))
     _confined(runtime / "runs", directory)
+    if claude:
+        directory = _claude_directory(runtime, directory, "code")
     stdout = _confined(runtime, directory / "stdout.log")
     try:
         with stdout.open("rb") as stream:
@@ -629,6 +642,8 @@ def _operation_model(runtime, operation, directory, session=None, *, allow_notif
     if directory is None:
         return None, None
     try:
+        if operation.get("kind") == "code" and operation.get("coding_provider") == "claude":
+            directory = _claude_directory(runtime, directory, "code")
         receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=16384)
         model = _clean(receipt.get("planning_model"), 120)
         effort = _clean(receipt.get("planning_reasoning_effort"), 40)
@@ -786,9 +801,14 @@ def _replanning_model(runtime, operation, directory):
     if operation.get("kind") != "plan" or operation.get("planning_provider") != "claude" or directory is None:
         return None, None
     try:
-        directory = _confined(runtime, directory)
-        if directory.parent != runtime / "runs" or not re.fullmatch(r"plan-[a-f0-9]{32}", directory.name):
+        logical = (_operation_directory(runtime, operation) if "output_dir" in operation
+                   else _confined(runtime, directory))
+        if logical is None or logical.parent != runtime / "runs" or not re.fullmatch(r"plan-[a-f0-9]{32}", logical.name):
             return None, None
+        selected = _claude_directory(runtime, logical, "plan")
+        if _confined(runtime, directory) not in (logical, selected):
+            return None, None
+        directory = selected
         with _confined(runtime, directory / "stdout.log").open("rb") as stream:
             header = stream.read(CLAUDE_SESSION_HEADER_BYTES)
         first = next((line for line in header.split(b"\n")[:-1] if line.strip()), None)
@@ -1650,6 +1670,10 @@ def collect_snapshot(config_path: Path) -> dict:
         if directory and owns_operation and codex_kind and kind == codex_kind and codex_operation:
             mode, directory = _codex_route(runtime, directory, codex_kind)
             snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt")
+        elif directory and owns_operation and (
+                kind == "code" and operation.get("coding_provider") == "claude" or
+                kind == "plan" and operation.get("planning_provider") == "claude"):
+            directory = _claude_directory(runtime, directory, kind)
         matches_operation = owns_operation and kind is not None and kind in {
             codex_kind, check_kind, "code" if operation_phase == "CODE" else None}
         finished_at = (_attempt_finished_at(runtime, directory, operation, check_id,

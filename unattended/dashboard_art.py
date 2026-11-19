@@ -348,7 +348,7 @@ def _diagnosis_response(config, state):
 def _reload_maintenance(config, state, *, lane="art"):
     """Project only an owned reload marker; never invoke the reload manager."""
     from .dashboard_state import (_CLAUDE_SESSION_ID, CLAUDE_SESSION_HEADER_BYTES, OWNER,
-                                  _confined, _iso, _native_code_active, _object, process_identity)
+                                  _claude_directory, _confined, _iso, _native_code_active, _object, process_identity)
     import json
     if lane not in {"art", "development"}:
         return None
@@ -398,6 +398,7 @@ def _reload_maintenance(config, state, *, lane="art"):
             operation.get("kind") == "code" and operation.get("task_id") == task.get("id") and _iso(operation.get("started_at"))):
         directory = _confined(runtime, Path(operation.get("output_dir", "")))
         if directory.parent == runtime / "runs" and re.fullmatch(r"code-[a-f0-9]{32}", directory.name):
+            directory = _claude_directory(runtime, directory, "code")
             receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=65536)
             finished = receipt.get("kind") == "code" and (type(receipt.get("exit_code")) is int or receipt.get("launch_or_capture_failed") is True)
             if not finished:

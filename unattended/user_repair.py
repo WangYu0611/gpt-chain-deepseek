@@ -137,7 +137,7 @@ def _native_answer(path, session):
 
 def read_repair_session(task, runtime, out):
     """Opening identity only for killed repair turns; never claim completion."""
-    from .providers import _strict_json
+    from .providers import _strict_json, claude_result_directory
     profile = validate_repair_profile(task, runtime)
     if profile is None:
         return None
@@ -146,6 +146,7 @@ def read_repair_session(task, runtime, out):
         return None
     expected = task["session_id"]
     try:
+        directory = _under(claude_result_directory("code", directory), directory)
         with _under(directory / "stdout.log", directory).open(encoding="utf-8-sig") as stream:
             for _ in range(64):
                 line = stream.readline(1024 * 1024)

@@ -153,7 +153,7 @@ def _diagnosis_model(runtime, directory, operation, task, receipt):
 
 def _art_operation(cfg, state, owned):
     """Read only current-run metadata; never scan an arbitrary or historical log."""
-    from .dashboard_state import _codex_route, _operation_model, _task_session
+    from .dashboard_state import _claude_directory, _codex_route, _operation_model, _task_session
     if not owned:
         return None, None, False
     operation, task = state["operation"], state["task"]
@@ -162,6 +162,8 @@ def _art_operation(cfg, state, owned):
         directory = _confined(runtime / "runs", Path(operation["output_dir"]))
         if operation["kind"] == "review":
             _, directory = _codex_route(runtime, directory, "review")
+        elif operation["kind"] in {"code", "art_diagnose"}:
+            directory = _claude_directory(runtime, directory, operation["kind"])
         receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=16384)
         finished = receipt.get("kind") == operation["kind"] and (
             type(receipt.get("exit_code")) is int or receipt.get("launch_or_capture_failed") is True)

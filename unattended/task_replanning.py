@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 
 from . import gitops
-from .providers import ProviderError, read_session, validate_output
+from .providers import ProviderError, claude_result_directory, read_session, validate_output
 from .storage import read_json, write_json
 from .ue_checks import _safe_under
 
@@ -52,13 +52,16 @@ class TaskReplanning:
         if out.parent != runs or not re.fullmatch(r"code-[0-9a-f]{32}", out.name):
             raise ValueError("CODE 超时回执目录不属于当前操作。")
         out = _safe_under(runs, out.name)
-        path = _safe_under(out, "process.json")
+        capture = claude_result_directory("code", out)
+        capture = _safe_under(out, capture.relative_to(out))
+        path = _safe_under(capture, "process.json")
         if not path.is_file() or path.stat().st_size > 16384:
             raise ValueError("CODE 超时缺少受信进程回执。")
         record = read_json(path)
         session = task.get("session_id")
         requested = op.get("requested_session_id", session)
-        observed = read_session(out, requested_session=requested)
+        effective_requested = session if capture != out and requested is None else requested
+        observed = read_session(out, requested_session=effective_requested)
         repair = task.get("user_repair")
         if repair:
             from .user_repair import read_repair_session
@@ -75,7 +78,7 @@ class TaskReplanning:
                 record.get("timed_out") is not True or record.get("output_limit_exceeded") is not False or
                 record.get("launch_or_capture_failed") or type(record.get("exit_code")) is not int or
                 (record.get("session_id") not in (None, session) if repair else record.get("session_id") != session) or
-                record.get("requested_session") != requested or requested not in (None, session) or observed != session):
+                record.get("requested_session") != effective_requested or requested not in (None, session) or observed != session):
             raise ValueError("CODE 预算中断或原生会话证据不匹配。")
         return out
 
@@ -198,8 +201,11 @@ class TaskReplanning:
                     "model": self.config.get("claude", {}).get("model"),
                     "reasoning_effort": self.config.get("claude", {}).get("reasoning_effort")})}
         if code_timeout:
-            for name in ("process.json", "stdout.log", "stderr.log"):
-                evidence(out / name, out)
+            capture = claude_result_directory("code", out)
+            capture = _safe_under(out, capture.relative_to(out))
+            for directory in ([out] if capture == out else [out, capture]):
+                for name in ("process.json", "stdout.log", "stderr.log"):
+                    evidence(directory / name, out)
             # Fixed per-attempt core log names; no arbitrary runtime glob.
             log_root = _safe_under(work, Path("Saved/Logs") / out.name)
             for index in range(1, len(task.get("core_tests") or []) + 1):

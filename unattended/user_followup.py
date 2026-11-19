@@ -16,6 +16,23 @@ from .storage import lock, read_json, write_json, write_text
 from .user_repair import MODEL, _under, file_sha, validate_repair_profile
 
 
+def _code_capture(out, runtime):
+    from .providers import claude_result_directory
+    logical = _under(out, Path(runtime).absolute() / "runs")
+    if logical.parent != Path(runtime).absolute() / "runs":
+        raise ValueError("Follow-up source must use its logical managed CODE run")
+    return logical, _under(claude_result_directory("code", logical), logical)
+
+
+def _capture_proof(logical, capture):
+    if capture == logical:
+        return None
+    process = _under(capture / "process.json", logical)
+    stdout = _under(capture / "stdout.log", logical)
+    return {"operation_output_dir": str(logical), "process_path": str(process), "process_sha256": file_sha(process),
+            "stdout_path": str(stdout), "stdout_sha256": file_sha(stdout)}
+
+
 def load_followup_request(request_path, runtime):
     runtime = Path(runtime).absolute()
     path = _under(request_path, runtime / "user-followups")
@@ -76,14 +93,16 @@ def validate_followup_profile(task, runtime):
             raise ValueError("Follow-up source interruption checkpoint changed")
         proof = ue_checks._object(path, maximum=4 * 1024 * 1024)
         source = request["source_operation"]
-        out = _under(source["output_dir"], Path(runtime) / "runs")
+        out, capture = _code_capture(source["output_dir"], runtime)
+        native_receipt = _capture_proof(out, capture)
         if (proof.get("original_request_sha256") != profile["request_sha256"] or
                 proof.get("original_operation") != source or proof.get("session_id") != profile["session_id"] or
                 proof.get("source_status") != "interrupted" or proof.get("completed") is not False or
                 proof.get("opening_verified") is not True or proof.get("model_verified") is not False or
                 proof.get("recovery_record") not in task.get("code_timeout_recoveries", []) or
-                file_sha(_under(out / "process.json", out)) != proof.get("process_sha256") or
-                file_sha(_under(out / "stdout.log", out)) != proof.get("stdout_sha256")):
+                file_sha(_under(capture / "process.json", out)) != proof.get("process_sha256") or
+                file_sha(_under(capture / "stdout.log", out)) != proof.get("stdout_sha256") or
+                native_receipt is not None and any(proof.get(key) != value for key, value in native_receipt.items())):
             raise ValueError("Follow-up interrupted source evidence no longer matches its original authorization")
     return profile
 
@@ -112,11 +131,13 @@ def completed_followup_evidence(task, runtime):
     receipt = ue_checks._object(path, maximum=8 * 1024 * 1024)
     op, result = receipt.get("operation", {}), receipt.get("result", {})
     evidence = result.get("user_followup", {})
-    stdout = _under(Path(op.get("output_dir", "")) / "stdout.log", runtime / "runs")
+    logical, capture = _code_capture(op.get("output_dir", ""), runtime)
+    stdout = _under(capture / "stdout.log", logical)
     if (receipt.get("id") != profile["id"] or receipt.get("task_id") != task["id"] or
             receipt.get("request_sha256") != profile["request_sha256"] or
             evidence.get("completed") is not True or
-            evidence.get("evidence", {}).get("raw_stdout_sha256") != file_sha(stdout)):
+            evidence.get("evidence", {}).get("raw_stdout_sha256") != file_sha(stdout) or
+            receipt.get("native_receipt") != _capture_proof(logical, capture)):
         raise ValueError("Follow-up raw tool proof no longer matches its completion receipt")
     return deepcopy(evidence)
 
@@ -165,12 +186,16 @@ class UserFollowup:
     def _followup_source_proof(self, request, task):
         from .full_flow_native import parse_full_flow_native
         op = request["source_operation"]
-        out = _under(op["output_dir"], self.runtime / "runs")
-        process_path = _under(out / "process.json", out)
-        stdout = _under(out / "stdout.log", out)
+        out, capture = _code_capture(op["output_dir"], self.runtime)
+        process_path = _under(capture / "process.json", out)
+        stdout = _under(capture / "stdout.log", out)
         process = ue_checks._object(process_path)
         if process.get("timed_out") is True:
-            return self._followup_interrupted_source(request, task, process, process_path, stdout)
+            proof = self._followup_interrupted_source(request, task, process, process_path, stdout)
+            native_receipt = _capture_proof(out, capture)
+            if native_receipt is not None:
+                proof.update(native_receipt)
+            return proof
         session, terminal, errors, rate, model = parse_full_flow_native(
             stdout, request["session_id"], op["coding_model"], op["coding_reasoning_effort"])
         if (process.get("exit_code") != 0 or process.get("timed_out") is not False or
@@ -191,9 +216,12 @@ class UserFollowup:
                 datetime.fromisoformat(request["authorized_at"]).timestamp() > process_path.stat().st_mtime or
                 datetime.fromisoformat(request["authorized_at"]) < datetime.fromisoformat(op["started_at"])):
             raise ValueError("Follow-up is not bound to the current delivery or was authorized after its completion")
-        return {"process_sha256": file_sha(process_path), "stdout_sha256": file_sha(stdout), "model_selection": model,
-                "process_receipt_mtime": datetime.fromtimestamp(process_path.stat().st_mtime, timezone.utc).isoformat(),
-                "time_source": "process_receipt_filesystem_mtime", "delivery_sha256": file_sha(delivered)}
+        proof = {"process_sha256": file_sha(process_path), "stdout_sha256": file_sha(stdout), "model_selection": model,
+                 "process_receipt_mtime": datetime.fromtimestamp(process_path.stat().st_mtime, timezone.utc).isoformat(),
+                 "time_source": "process_receipt_filesystem_mtime", "delivery_sha256": file_sha(delivered)}
+        if capture != out:
+            proof.update(process_path=str(process_path), stdout_path=str(stdout), operation_output_dir=str(out))
+        return proof
 
     def _followup_interrupted_source(self, request, task, process, process_path, stdout):
         """A genuine budget end may hand off a recovered commit, never fake a terminal."""
@@ -380,8 +408,14 @@ class UserFollowup:
         path = Path(profile["request_path"]).parent / f"turn-{op['user_followup_turn']}.json"
         receipt = {"version": 1, "id": profile["id"], "task_id": task["id"], "request_sha256": profile["request_sha256"],
                    "operation": op, "candidate": candidate, "result": result, "finished_at": self.now().isoformat()}
-        if path.exists() and read_json(path).get("result") != result:
-            raise ValueError("Completed follow-up turn receipt changed")
+        logical, capture = _code_capture(op["output_dir"], self.runtime)
+        native_receipt = _capture_proof(logical, capture)
+        if native_receipt is not None:
+            receipt["native_receipt"] = native_receipt
+        if path.exists():
+            existing = read_json(path)
+            if existing.get("result") != result or existing.get("native_receipt") != receipt.get("native_receipt"):
+                raise ValueError("Completed follow-up turn receipt changed")
         if not path.exists():
             write_json(path, receipt)
         delivery = path.with_suffix(".md")
