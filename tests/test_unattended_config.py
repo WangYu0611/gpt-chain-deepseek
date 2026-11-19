@@ -89,6 +89,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "claude.auth_mode"):
             config.load_config(self.save())
 
+    def test_review_transport_defaults_to_codex_and_direct_api_requires_a_model(self):
+        self.assertEqual(config.load_config(self.save())["codex"].get("review_transport", "codex"), "codex")
+        self.value["codex"]["review_transport"] = "responses_api"
+        with self.assertRaisesRegex(ValueError, "codex.model"):
+            config.load_config(self.save())
+        self.value["codex"]["model"] = "gpt-6-astra"
+        self.assertEqual(config.load_config(self.save())["codex"]["review_transport"], "responses_api")
+        for invalid in ("unknown", "", None, []):
+            self.value["codex"]["review_transport"] = invalid
+            with self.subTest(value=invalid), self.assertRaisesRegex(ValueError, "codex.review_transport"):
+                config.load_config(self.save())
+
     def test_explicit_models_and_reasoning_survive_loading(self):
         self.value["codex"].update(model="gpt-6-astra", reasoning_effort="high")
         self.value["dsh"].update(model="deepseek-flash", reasoning_effort="max")
@@ -249,6 +261,36 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["checks"]["codex_available"])
         self.assertFalse(result["checks"]["dsh_available"])
+
+    def test_doctor_direct_api_review_needs_key_and_model_but_codex_cli_only_for_codex_planner(self):
+        self.value.update(planning_provider="claude", coding_provider="claude",
+                          claude={"command": ["claude.exe"]})
+        self.value["codex"].update(review_transport="responses_api", model="gpt-6-astra",
+                                    command=[str(self.root / "missing-codex.exe")])
+        candidate = config.load_config(self.save())
+        calendar = self.path.parent / "calendar.json"
+        calendar.write_text(json.dumps({"years": [datetime.now(timezone.utc).year], "holidays": [],
+                                        "workdays": [], "overrides": {}}), encoding="utf-8")
+        candidate["schedule"]["holidays_file"] = str(calendar)
+        with patch.object(config.gitops, "head", return_value="a" * 40), \
+             patch.object(config.gitops, "git", return_value="identity"), \
+             patch.object(config.shutil, "which", side_effect=lambda executable: "claude.exe" if executable == "claude.exe" else None), \
+             patch("unattended.providers._codex_api_key", return_value="synthetic-api-key") as key:
+            result = config.doctor(candidate)
+            self.assertTrue(result["ready"])
+            self.assertFalse(result["checks"]["codex_available"])
+            self.assertFalse(result["checks"]["codex_cli_required"])
+            self.assertTrue(result["checks"]["review_model_configured"])
+            candidate["planning_provider"] = "codex"
+            self.assertFalse(config.doctor(candidate)["ready"])
+            candidate["planning_provider"] = "claude"
+            key.return_value = None
+            missing_key = config.doctor(candidate)
+            self.assertFalse(missing_key["ready"])
+            self.assertFalse(missing_key["checks"]["codex_api_key_configured"])
+            key.return_value = "synthetic-api-key"
+            candidate["codex"].pop("model")
+            self.assertFalse(config.doctor(candidate)["ready"])
 
     def test_doctor_checks_shared_claude_api_credentials_without_exposing_them(self):
         self.value.update(planning_provider="claude", coding_provider="claude",

@@ -272,6 +272,11 @@ def load_config(path: Path) -> dict:
             config[key]["patches"] = [_path(x, path.parent) for x in config[key]["patches"]]
     if config["codex"].get("sandbox", "read-only") != "read-only":
         raise ValueError("Codex 规划和验收必须使用 read-only。")
+    review_transport = config["codex"].get("review_transport", "codex")
+    if review_transport not in ("codex", "responses_api"):
+        raise ValueError("codex.review_transport 必须为 codex 或 responses_api。")
+    if review_transport == "responses_api" and not config["codex"].get("model"):
+        raise ValueError("Responses API 验收需要显式配置 codex.model。")
     if config["codex"].get("auth_mode", "inherit") not in ("inherit", "api_key"):
         raise ValueError("codex.auth_mode 必须为 inherit 或 api_key。")
     subscription_fallback = config["codex"].get("subscription_fallback", False)
@@ -378,11 +383,23 @@ def doctor(config: dict) -> dict:
     except (ProviderError, OSError, ValueError):
         # Doctor is an inventory, including during an incomplete desktop update.
         checks["codex_available"] = False
-    api_mode = config["codex"].get("auth_mode") == "api_key"
-    codex_auth_ready = not api_mode or bool(_codex_api_key(config.get("config_path"), secrets_file=config.get("secrets_file")))
+    direct_review = config["codex"].get("review_transport", "codex") == "responses_api"
+    codex_cli_required = not direct_review or config.get("planning_provider", "codex") == "codex"
+    checks["codex_cli_required"] = codex_cli_required
+    checks["review_transport"] = "responses_api" if direct_review else "codex"
+    api_mode = direct_review or config["codex"].get("auth_mode") == "api_key"
+    codex_auth_ready = True
+    if api_mode:
+        try:
+            codex_auth_ready = bool(_codex_api_key(config.get("config_path"), secrets_file=config.get("secrets_file")))
+        except ValueError:
+            codex_auth_ready = False
     if api_mode:
         checks["codex_api_key_configured"] = codex_auth_ready
         checks["codex_subscription_fallback_enabled"] = config["codex"].get("subscription_fallback", False)
+    review_model_ready = not direct_review or bool(config["codex"].get("model"))
+    if direct_review:
+        checks["review_model_configured"] = review_model_ready
     uses_claude = "claude" in (config.get("planning_provider", "codex"), config.get("coding_provider", "dsh"))
     claude_auth_ready = True
     if uses_claude:
@@ -407,6 +424,10 @@ def doctor(config: dict) -> dict:
     from datetime import datetime, timezone
     checks["calendar"] = WorkCalendar(config["schedule"], base_dir=Path(config["config_path"]).parent).describe(datetime.now(timezone.utc))
     planner_ready = not uses_claude or checks["claude_available"]
-    ready = bool(checks.get("project_head")) and codex_auth_ready and claude_auth_ready and planner_ready and coder_ready and checks["calendar"]["calendar_covered"] and all(checks.get(x) for x in ("git_identity", "codex_available", "independent_checks_configured"))
+    codex_cli_ready = not codex_cli_required or checks["codex_available"]
+    ready = (bool(checks.get("project_head")) and codex_auth_ready and claude_auth_ready
+             and planner_ready and coder_ready and codex_cli_ready and review_model_ready
+             and checks["calendar"]["calendar_covered"]
+             and all(checks.get(x) for x in ("git_identity", "independent_checks_configured")))
     return {"status": "ready" if ready else "needs_setup", "ready": ready, "checks": checks,
             "note": "只读检查未调用模型，也不验证账号登录或额度；checks 需配置项目实际可执行的验收命令。"}

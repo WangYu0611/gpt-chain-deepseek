@@ -202,6 +202,24 @@ def _json_file(path: Path, limit: int = 2 * 1024 * 1024) -> Any:
     return _strict_json(path.read_text(encoding="utf-8-sig"))
 
 
+def _responses_api_receipt(out: Path) -> dict | None:
+    try:
+        path = Path(out) / "process.json"
+        if path.is_symlink():
+            return None
+        with path.open("rb") as source:
+            size = os.fstat(source.fileno()).st_size
+            if size > 1024 * 1024:
+                return None
+            raw = source.read(size + 1)
+        if len(raw) != size:
+            return None
+        record = _strict_json(raw.decode("utf-8-sig"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return record if type(record) is dict and record.get("protocol") == "openai_responses_v1" else None
+
+
 def _failure_tail(path: Path, limit: int) -> tuple[bytes, bool]:
     if path.is_symlink():
         raise ValueError("Failure log is a symlink")
@@ -735,6 +753,12 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
     """
     if kind not in {"code", "plan", "review", "art_diagnose"}:
         return None
+    direct = _responses_api_receipt(out)
+    if direct is not None:
+        if kind != "review" or direct.get("kind") != "review":
+            return None
+        from . import api_review
+        return api_review.classify_failure(out)
     out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out)
     try:
         path = out / "process.json"
@@ -1939,7 +1963,23 @@ class AgentProviders:
         return self._codex("plan", prompt, cwd, out, timeout)
 
     def review(self, prompt: str, cwd: Path, out: Path, timeout: float) -> dict:
-        return self._codex("review", prompt, cwd, out, timeout)
+        settings = self.config.get("codex", {})
+        transport = settings.get("review_transport", "codex")
+        if transport == "codex":
+            return self._codex("review", prompt, cwd, out, timeout)
+        if transport != "responses_api":
+            raise ProviderError("codex.review_transport must be codex or responses_api")
+        try:
+            validate_model_settings(settings, "codex")
+        except ValueError as error:
+            raise ProviderError(str(error)) from error
+        if settings.get("sandbox", "read-only") != "read-only":
+            raise ProviderError("API reviewer requires read-only access")
+        if settings.get("review_instructions"):
+            prompt += "\n" + str(settings["review_instructions"])
+        art_directory = _codex_art_review_directory(self.config, Path(cwd), Path(out).resolve())
+        from . import api_review
+        return api_review.review(self.config, prompt, cwd, out, timeout, art_directory=art_directory)
 
     def _codex(self, kind: str, prompt: str, cwd: Path, out: Path, timeout: float) -> dict:
         settings = self.config.get("codex", {})
@@ -2486,6 +2526,12 @@ class AgentProviders:
 
     def recover(self, kind: str, out: Path) -> dict | None:
         """Validate existing process/protocol artifacts without issuing a request."""
+        direct = _responses_api_receipt(out)
+        if direct is not None:
+            if kind != "review" or direct.get("kind") != "review":
+                raise ProviderError("Saved API reviewer stage differs from the requested stage")
+            from . import api_review
+            return api_review.recover(out)
         out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out).resolve()
         if not (out / "process.json").is_file():
             return None

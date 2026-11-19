@@ -1199,10 +1199,10 @@
       setTone(slot+'-state',filesystemWaiting||retrying?'warn':active?'working':'','model-state');
     }
     const auth=data.codex_auth||{};
-    const authPolicy={api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录'}[auth.policy];
+    const authPolicy={responses_api:'OpenAI API · Responses 接口',api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录'}[auth.policy];
     const authTiming=s.attempt_finished?'上次走 ':'当前走 ';
     const authLabel=auth.current==='chatgpt'?authTiming+'Codex 订阅'+(auth.fallback?' · API 额度耗尽':''):
-      auth.current==='api_key'?authTiming+'GPT API':authPolicy;
+      auth.current==='responses_api'?authTiming+'OpenAI API':auth.current==='api_key'?authTiming+'GPT API':authPolicy;
     $('codex-auth').hidden=!authLabel;text('codex-auth',authLabel);
     const b=data.burst,burstEnded=!!b&&['completed','done'].includes(str(b.status).toLowerCase());$('burst').hidden=!b||(burstEnded&&!waitingWithoutOperation);
     if(b&&burstEnded&&waitingWithoutOperation){const nextOpen=parsed(sch.next_open),beijingDay=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'});const resumes=nextOpen?(beijingDay.format(nextOpen)===beijingDay.format(new Date())?'今天 '+new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hour12:false}).format(nextOpen):dateTime(nextOpen))+' 自动继续':'下次工作窗口自动继续';text('burst',(b.ignore_window===true?'试跑':'手动批次')+' '+(b.completed_tasks??'—')+'/'+(b.requested_tasks??'—')+' 已完成，已恢复原排期，'+resumes+'。');setTone('burst','good','burst');}

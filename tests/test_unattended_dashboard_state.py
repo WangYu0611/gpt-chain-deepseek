@@ -128,6 +128,32 @@ class DashboardStateTests(unittest.TestCase):
         self.assertFalse(status["attempt_finished"])
         self.assertEqual(status["elapsed_seconds"], 300)
 
+    def test_direct_api_route_uses_its_receipt_without_codex_events_or_subscription_fallback(self):
+        self.config["codex"].update(review_transport="responses_api", auth_mode="api_key", subscription_fallback=True)
+        self.write(self.config_path, self.config)
+        self.state.update(phase="REVIEW", task={"id": "TASK-1", "candidate": {"head_sha": "a" * 40}})
+        directory = self.logs([], kind="review")
+        self.state["operation"].update(task_id="TASK-1", head_sha="a" * 40)
+        self.assertEqual(self.snapshot()["codex_auth"], {"policy": "responses_api", "current": None, "fallback": False})
+        receipt = {"protocol": "openai_responses_v1", "kind": "review", "status": "running", "exit_code": None,
+                   "turns": [{"response_hash": "PRIVATE_METADATA" * 2000}]}
+        self.write(directory / "process.json", receipt)
+        running = self.snapshot()
+        self.assertEqual(running["codex_auth"], {"policy": "responses_api", "current": "responses_api", "fallback": False})
+        self.assertFalse(running["status"]["attempt_finished"])
+        self.assertNotIn("PRIVATE_METADATA", json.dumps(running))
+        receipt.update(status="completed", exit_code=0)
+        path = directory / "process.json"
+        self.write(path, receipt)
+        finished = self.now.timestamp() - 30
+        os.utime(path, (finished, finished))
+        completed = self.snapshot()
+        self.assertTrue(completed["status"]["attempt_finished"])
+        self.assertEqual(completed["codex_auth"]["current"], "responses_api")
+        receipt["kind"] = "plan"
+        self.write(path, receipt)
+        self.assertIsNone(self.snapshot()["codex_auth"]["current"])
+
     def test_blocked_review_freezes_at_final_subscription_receipt_after_worker_exit(self):
         self.config["codex"].update(auth_mode="api_key", subscription_fallback=True)
         self.write(self.config_path, self.config)

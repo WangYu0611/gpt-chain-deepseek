@@ -76,6 +76,11 @@ class RejectedProviderOutputTests(unittest.TestCase):
         task = dict(state["task"])
         op = self.f.engine._new_operation(state, "review")
         self.invalid_output("review", Path(op["output_dir"]))
+        process_path = Path(op["output_dir"]) / "process.json"
+        process = json.loads(process_path.read_text(encoding="utf-8"))
+        process["turns"] = [{"response_sha256": "a" * 64} for _ in range(250)]
+        write_json(process_path, process)
+        self.assertGreater(process_path.stat().st_size, 16384)
         old_recover = self.f.providers.recover
         def recover(kind, out):
             if str(out) == op["output_dir"]:

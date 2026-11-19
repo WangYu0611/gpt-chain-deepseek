@@ -122,6 +122,49 @@ class ProviderTests(unittest.TestCase):
         process.side_effect = self.fake_codex
         self.assertEqual(self.providers.review("Review", self.root, self.root / "review", 30), REVIEW)
 
+    @patch("unattended.providers._codex_art_review_directory")
+    @patch("unattended.providers._codex_command")
+    @patch("unattended.api_review.review", return_value=REVIEW)
+    def test_direct_api_review_dispatches_with_validated_art_context_without_codex_cli(self, review, command, evidence):
+        art = self.root / "public-art"
+        evidence.return_value = art
+        self.providers.config["codex"].update(review_transport="responses_api", model="gpt-6-astra",
+                                               review_instructions="Check every acceptance criterion.")
+        out = self.root / "direct-review"
+        result = self.providers.review("Review", self.root, out, 30)
+        self.assertEqual(result, REVIEW)
+        evidence.assert_called_once_with(self.providers.config, self.root, out)
+        review.assert_called_once_with(self.providers.config, "Review\nCheck every acceptance criterion.",
+                                       self.root, out, 30, art_directory=art)
+        command.assert_not_called()
+
+    @patch("unattended.providers.parse_codex_events")
+    @patch("unattended.providers.codex_result_directory")
+    @patch("unattended.api_review.recover", return_value=REVIEW)
+    def test_direct_api_recovery_uses_real_api_protocol_even_after_transport_configuration_changes(self, recover, route, events):
+        out = self.root / "direct-review"
+        out.mkdir()
+        (out / "process.json").write_text(json.dumps({"protocol": "openai_responses_v1", "kind": "review"}),
+                                           encoding="utf-8")
+        self.assertEqual(self.providers.recover("review", out), REVIEW)
+        recover.assert_called_once_with(out)
+        with self.assertRaisesRegex(ProviderError, "stage differs"):
+            self.providers.recover("plan", out)
+        route.assert_not_called()
+        events.assert_not_called()
+
+    @patch("unattended.providers.codex_result_directory")
+    @patch("unattended.api_review.classify_failure", return_value={"reason": "transport"})
+    def test_direct_api_failure_classification_uses_its_protocol_and_rejects_other_stages(self, classify, route):
+        out = self.root / "direct-failure"
+        out.mkdir()
+        (out / "process.json").write_text(json.dumps({"protocol": "openai_responses_v1", "kind": "review"}),
+                                           encoding="utf-8")
+        self.assertEqual(classify_transient_failure("review", out), {"reason": "transport"})
+        self.assertIsNone(classify_transient_failure("plan", out))
+        classify.assert_called_once_with(out)
+        route.assert_not_called()
+
     @patch("unattended.providers.run_process")
     def test_local_secrets_are_only_passed_to_the_matching_provider(self, process):
         self.providers.config["config_path"] = str(self.root / "unattended.local.json")

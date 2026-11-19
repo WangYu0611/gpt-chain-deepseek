@@ -56,6 +56,8 @@ if (!(Test-Path secrets.local.json)) { Copy-Item secrets.example.json secrets.lo
 
 Codex 和 Claude API 模式优先读取共享文件，缺少密钥时查找进程环境中的同名变量。DeepSeek 也支持 `DEEPSEEK_API_KEY` 环境变量。Codex 可配置 `subscription_fallback: true`，API 余额耗尽或服务明确返回赠送额度禁止用于 Codex 时，使用已登录的订阅。Claude 的 `auth_mode` 默认是 `subscription`，使用 API 时改为 `api_key`。GitHub 推送使用 Git 已配置的凭据。
 
+任务、阶段与美术审核支持直接调用 OpenAI Responses API。在 `codex` 配置中设置 `"review_transport": "responses_api"`，并配置 `model`、`reasoning_effort` 和共享密钥文件。审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 响应与工具记录保存在对应运行目录，重启时验证回执后恢复。该模式通过 `CODEX_API_KEY` 调用普通 API，API 错误会记录并按类型重试。
+
 ## 历史入口：GitHub × DSH 配置
 
 双击项目目录中的 **`打开GitHub仓库设置.cmd`**，打开本地设置窗口。也可以运行 `github-harness.cmd`。

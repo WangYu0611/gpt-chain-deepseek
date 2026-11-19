@@ -300,9 +300,14 @@ def _codex_turn_started(stdout):
 def _codex_route(runtime, directory, kind):
     """Select the active transcript only after confirming its authentication route."""
     try:
-        api = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=16384)
+        api = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=1024 * 1024)
     except (OSError, ValueError, RuntimeError):
         return None, directory
+    if api.get("protocol") == "openai_responses_v1":
+        running = api.get("status") == "running" and api.get("exit_code") is None
+        finished = api.get("status") in ("completed", "failed") and type(api.get("exit_code")) is int
+        mode = "responses_api" if kind == "review" and api.get("kind") == kind and (running or finished) else None
+        return mode, directory
     if api.get("kind") != kind or api.get("codex_auth_mode") != "api_key" or type(api.get("exit_code")) is not int:
         return None, directory
     try:
@@ -331,7 +336,7 @@ def _attempt_finished_at(runtime, directory, operation, check_id, started_at, up
         return None
     try:
         path = _confined(runtime, directory / ("check.json" if checking else "process.json"))
-        receipt = _object(path, missing={}, maximum=65536 if checking else 16384)
+        receipt = _object(path, missing={}, maximum=65536 if checking else 1024 * 1024)
         if checking:
             if (receipt.get("id") != check_id or not operation.get("head_sha") or
                     receipt.get("head_sha") != operation["head_sha"] or type(receipt.get("passed")) is not bool):
@@ -1430,6 +1435,8 @@ def collect_snapshot(config_path: Path) -> dict:
         codex = config["codex"]
         policy = codex.get("auth_mode", "inherit")
         snapshot["codex_auth"]["policy"] = "api_then_subscription" if codex.get("subscription_fallback") is True else policy
+        if codex.get("review_transport") == "responses_api":
+            snapshot["codex_auth"]["policy"] = "responses_api"
         snapshot["check_progress"]["total"] = len(config["checks"])
         snapshot["worker"] = _worker(runtime, config_path, now)
         state = _object(_confined(runtime, runtime / "state.json"), missing=None)

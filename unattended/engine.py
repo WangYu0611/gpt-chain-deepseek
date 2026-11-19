@@ -797,7 +797,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         return op
 
     def _retire_rejected_provider_output(self, state, error):
-        """Count a rejected successful CLI receipt once, preserving its evidence.
+        """Count a rejected successful provider receipt once, preserving its evidence.
 
         Failed/incomplete processes retain their existing recovery rules. Only
         PLAN/REVIEW receipts rejected by the provider validator are retired;
@@ -809,7 +809,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         directory = codex_result_directory(op["kind"], Path(op["output_dir"]))
         process_path = directory / "process.json"
         try:
-            if process_path.is_symlink() or not process_path.is_file() or process_path.stat().st_size > 16384:
+            if process_path.is_symlink() or not process_path.is_file() or process_path.stat().st_size > 1024 * 1024:
                 return
             process = read_json(process_path)
             if (process.get("kind") != op["kind"] or type(process.get("exit_code")) is not int or

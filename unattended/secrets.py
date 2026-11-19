@@ -64,6 +64,21 @@ def read_secret(name: str, *, config_path: str | Path | None = None,
     return _validate_secret(settings.get(name, ""), name)
 
 
+def secret_values(config_path=None, secrets_file=None) -> list[str]:
+    """Collect central credential values for output redaction, including archived keys."""
+    pending = [_secret_settings(config_path=config_path, secrets_file=secrets_file)]
+    result = set()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(item for name, item in value.items() if not str(name).upper().endswith("BASE_URL"))
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str) and len(value.strip()) >= 8:
+            result.add(value.strip())
+    return sorted(result, key=len, reverse=True)
+
+
 def validate_api_base_url(value) -> str:
     try:
         if not isinstance(value, str) or not value or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
