@@ -139,8 +139,10 @@ def invoke(config_path, request_path, phase):
             (state.get("task") or {}).get("session_id") != operator["source_session"]):
         raise RuntimeError("The original task, session, or candidate changed")
     settings = config["claude"]
-    if not claude_subscription_ready(settings, source):
+    if settings.get("auth_mode", "subscription") == "subscription" and not claude_subscription_ready(settings, source):
         raise RuntimeError("Native Claude subscription login is unavailable")
+    environment = _claude_environment(settings, config_path=config.get("config_path"),
+                                      secrets_file=config.get("secrets_file"))
     output = run / "native" / phase
     if phase == "analysis" and output.exists():
         output = next((run / "native" / f"analysis-{number}" for number in range(2, 10)
@@ -273,13 +275,14 @@ def invoke(config_path, request_path, phase):
     print(json.dumps({"status": status, "output": str(output), "model": MODEL}, ensure_ascii=True), flush=True)
     with lock(run / "native.lock"):
         try:
-            environment = _claude_environment()
             if phase != "plan":
                 # Ordinary code calls keep the provider's no-background policy.
                 # This whole-flow job explicitly waits for each owned long task.
                 environment.pop("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", None)
             result = run_process(argv, cwd=source, output_dir=output, timeout_seconds=timeout,
                                  environment=environment, stdin=prompt.encode("utf-8"),
+                                 secrets=[environment[name] for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+                                          if environment.get(name)],
                                  max_output_bytes=64 * 1024 * 1024, stdout_record_filter=_claude_log_record)
             write_json(output / "process.json", {"exit_code": result.exit_code, "timed_out": result.timed_out,
                        "output_limit_exceeded": result.output_limit_exceeded, "finished_at": now()})

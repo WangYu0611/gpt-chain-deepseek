@@ -1,6 +1,7 @@
 """Claude planning must retain structured, read-only and restart-safe receipts."""
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -84,6 +85,26 @@ class ClaudePlannerTests(unittest.TestCase):
         (self.out / "result.json").unlink()
         self.assertEqual(AgentProviders({}).recover("plan", self.out), PLAN)
         launch.assert_called_once()
+
+    @patch("unattended.providers.claude_subscription_ready")
+    @patch("unattended.providers.run_process")
+    def test_api_plan_uses_central_secret_and_preserves_model_schema_and_read_only_permissions(self, launch, auth):
+        central = self.root / "central-secrets.json"
+        central.write_text(json.dumps({"ANTHROPIC_API_KEY": "central-claude-planning-key"}), encoding="utf-8")
+        self.provider.config.update(config_path=str(self.root / "nested" / "config.json"), secrets_file=str(central))
+        self.settings["auth_mode"] = "api_key"
+        launch.side_effect = lambda *args, **kwargs: self.capture(self.events())
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "stale-process-key"}):
+            self.assertEqual(self.provider.plan("Plan", self.work, self.out, 30), PLAN)
+        argv = launch.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), PLAN_SCHEMA)
+        self.assertNotIn("forceLoginMethod", json.loads(argv[argv.index("--settings") + 1]))
+        self.assertNotIn("central-claude-planning-key", json.dumps(argv))
+        self.assertEqual(launch.call_args.kwargs["environment"]["ANTHROPIC_API_KEY"], "central-claude-planning-key")
+        self.assertIn("central-claude-planning-key", launch.call_args.kwargs["secrets"])
+        auth.assert_not_called()
 
     @patch("unattended.providers.AgentProviders._codex")
     def test_codex_remains_the_reviewer_and_the_default_legacy_planner(self, codex):

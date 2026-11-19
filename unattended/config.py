@@ -181,6 +181,14 @@ def load_config(path: Path) -> dict:
     project, runtime = Path(config["project_path"]), Path(config["runtime_dir"])
     if runtime == project or runtime.is_relative_to(project) or project.is_relative_to(runtime):
         raise ValueError("runtime_dir 与原项目目录不能相互包含。")
+    if "secrets_file" in config:
+        value = config["secrets_file"]
+        if not isinstance(value, str) or not value.strip() or "\0" in value:
+            raise ValueError("secrets_file 必须为有效文件路径。")
+        secret_path = Path(_path(value, path.parent))
+        if any(secret_path == root or secret_path.is_relative_to(root) for root in (project, runtime)):
+            raise ValueError("secrets_file 必须放在项目与模型工作目录之外。")
+        config["secrets_file"] = str(secret_path)
     if not isinstance(config.get("branch"), str) or not config["branch"].startswith("unattended/"):
         raise ValueError("branch 必须为 unattended/ 下的独立工作分支。")
     config.setdefault("schedule", {})
@@ -275,6 +283,8 @@ def load_config(path: Path) -> dict:
             raise ValueError("claude.max_output_bytes 必须为 1024 至 268435456 之间的整数字节数。")
     if "claude" in (planner, coder):
         settings = config["claude"]
+        if settings.get("auth_mode", "subscription") not in ("subscription", "api_key"):
+            raise ValueError("claude.auth_mode 必须为 subscription 或 api_key。")
         if "critical_plan_reasoning_effort" in settings and "critical_plan_model" not in settings:
             raise ValueError("claude.critical_plan_reasoning_effort 需要配置 critical_plan_model。")
         if "critical_plan_model" in settings:
@@ -361,7 +371,7 @@ def doctor(config: dict) -> dict:
     except (RuntimeError, OSError) as error:
         checks["project_error"] = str(error)
     # Import locally: provider validation imports this module's model settings.
-    from .providers import ProviderError, _codex_api_key, _codex_command
+    from .providers import ProviderError, _claude_environment, _codex_api_key, _codex_command
     try:
         command = _codex_command(config["codex"].get("command"))
         checks["codex_available"] = bool(shutil.which(command[0]) or Path(command[0]).is_file())
@@ -369,14 +379,22 @@ def doctor(config: dict) -> dict:
         # Doctor is an inventory, including during an incomplete desktop update.
         checks["codex_available"] = False
     api_mode = config["codex"].get("auth_mode") == "api_key"
-    codex_auth_ready = not api_mode or bool(_codex_api_key(config.get("config_path")))
+    codex_auth_ready = not api_mode or bool(_codex_api_key(config.get("config_path"), secrets_file=config.get("secrets_file")))
     if api_mode:
         checks["codex_api_key_configured"] = codex_auth_ready
         checks["codex_subscription_fallback_enabled"] = config["codex"].get("subscription_fallback", False)
     uses_claude = "claude" in (config.get("planning_provider", "codex"), config.get("coding_provider", "dsh"))
+    claude_auth_ready = True
     if uses_claude:
         command = config["claude"].get("command", ["claude"])
         checks["claude_available"] = bool(shutil.which(command[0]) or Path(command[0]).is_file())
+        if config["claude"].get("auth_mode", "subscription") == "api_key":
+            try:
+                _claude_environment(config["claude"], config_path=config.get("config_path"),
+                                    secrets_file=config.get("secrets_file"))
+            except (ProviderError, ValueError):
+                claude_auth_ready = False
+            checks["claude_api_key_configured"] = claude_auth_ready
     if config.get("coding_provider", "dsh") == "claude":
         coder_ready = checks["claude_available"]
     else:
@@ -389,6 +407,6 @@ def doctor(config: dict) -> dict:
     from datetime import datetime, timezone
     checks["calendar"] = WorkCalendar(config["schedule"], base_dir=Path(config["config_path"]).parent).describe(datetime.now(timezone.utc))
     planner_ready = not uses_claude or checks["claude_available"]
-    ready = bool(checks.get("project_head")) and codex_auth_ready and planner_ready and coder_ready and checks["calendar"]["calendar_covered"] and all(checks.get(x) for x in ("git_identity", "codex_available", "independent_checks_configured"))
+    ready = bool(checks.get("project_head")) and codex_auth_ready and claude_auth_ready and planner_ready and coder_ready and checks["calendar"]["calendar_covered"] and all(checks.get(x) for x in ("git_identity", "codex_available", "independent_checks_configured"))
     return {"status": "ready" if ready else "needs_setup", "ready": ready, "checks": checks,
             "note": "只读检查未调用模型，也不验证账号登录或额度；checks 需配置项目实际可执行的验收命令。"}

@@ -94,6 +94,26 @@ class FullFlowOperatorTests(unittest.TestCase):
         self.assertEqual(self.native_environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
         self.assertEqual((self.runtime / "state.json").read_bytes(), self.original_state)
 
+    def test_api_full_flow_skips_subscription_and_redacts_environment_credentials(self):
+        request = self.create()
+        captured = self.native()
+        self.config.update(config_path=str(self.runtime / "config.json"), secrets_file="../central-secrets.json")
+        self.config["claude"]["auth_mode"] = "api_key"
+        environment = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "ANTHROPIC_API_KEY": "test-anthropic-key"}
+        with patch.object(flow, "claude_subscription_ready") as subscription, \
+                patch.object(flow, "_claude_environment", return_value=environment) as resolve, \
+                patch.object(flow, "run_process", wraps=flow.run_process) as launch:
+            flow.invoke(Path("ignored"), request, "plan")
+        subscription.assert_not_called()
+        resolve.assert_called_once_with(self.config["claude"], config_path=self.config["config_path"],
+                                        secrets_file=self.config["secrets_file"])
+        self.assertEqual(launch.call_args.kwargs["secrets"], ["test-anthropic-key"])
+        self.assertEqual(launch.call_args.kwargs["environment"]["ANTHROPIC_API_KEY"], "test-anthropic-key")
+        policy = json.loads(captured[0][captured[0].index("--settings") + 1])
+        self.assertNotIn("forceLoginMethod", policy)
+        self.assertNotIn("test-anthropic-key", json.dumps(captured[0]))
+        self.assertNotIn("test-anthropic-key", (request.parent / "native/plan/invocation.json").read_text(encoding="utf-8"))
+
     def test_finished_model_reply_does_not_complete_unrun_tests(self):
         request = self.create()
         write_json(request.parent / "native/plan/answer.json", {"session_id": self.branch})

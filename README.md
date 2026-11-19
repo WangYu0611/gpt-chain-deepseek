@@ -41,16 +41,20 @@ Windows 后台运行使用 `unattended.cmd background start`；`background insta
 if (!(Test-Path secrets.local.json)) { Copy-Item secrets.example.json secrets.local.json }
 ```
 
-打开 `secrets.local.json`，填写启用服务的密钥。使用 `--config` 指定其他目录下的无人值守配置时，把密钥文件放在该配置旁边。本仓库的 Git 忽略 `secrets.local.json`。
+打开 `secrets.local.json`，填写启用服务的密钥。本仓库的 Git 忽略该文件及原始 `gpt_api.txt`、`claude_api.txt` 文件。主配置和独立美术 worker 配置均可设置 `"secrets_file": "C:/path/to/secrets.local.json"`，共用同一文件。相对路径以各自配置文件所在目录为基准，缺省读取配置旁的 `secrets.local.json`。
 
 | 字段 | 使用场景 |
 | --- | --- |
 | `CODEX_API_KEY` | `codex.auth_mode` 设为 `api_key` 时用于派工与验收。 |
+| `CODEX_API_KEY_BACKUPS` | 保存其余 GPT 密钥的数组。需要更换主密钥时，将选中的值填入 `CODEX_API_KEY`。 |
+| `CODEX_BASE_URL` | 可选 OpenAI Responses API 地址，留空使用官方服务。 |
+| `ANTHROPIC_API_KEY` | `claude.auth_mode` 设为 `api_key` 时用于 Claude 规划、编码、美术诊断及全流程测试。 |
+| `ANTHROPIC_BASE_URL` | 可选 Claude API 地址，留空使用官方服务。 |
 | `DEEPSEEK_API_KEY` | 使用 DeepSeek API 的 dsh 配置。 |
 | `TRIPO_API_KEY` | 在美术批次的 `key_file` 中填入 `secrets.local.json` 的绝对路径，该文件须位于目标项目目录之外。 |
 | `FEISHU_WEBHOOK_URL` | 启用本地飞书通知且通知设置未填写 `webhook_url` 时使用。默认在 `.unattended/feishu.local.json` 中设置启用状态、事件与面板地址。 |
 
-Codex 和 DeepSeek 优先使用进程环境中的同名变量。Codex 订阅模式与 Claude 使用各自 CLI 的登录。GitHub 推送使用 Git 已配置的凭据。
+Codex 和 Claude API 模式优先读取共享文件，缺少密钥时查找进程环境中的同名变量。DeepSeek 也支持 `DEEPSEEK_API_KEY` 环境变量。Codex 可配置 `subscription_fallback: true`，API 余额耗尽或服务明确返回赠送额度禁止用于 Codex 时，使用已登录的订阅。Claude 的 `auth_mode` 默认是 `subscription`，使用 API 时改为 `api_key`。GitHub 推送使用 Git 已配置的凭据。
 
 ## 历史入口：GitHub × DSH 配置
 

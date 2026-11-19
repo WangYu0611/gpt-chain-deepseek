@@ -9,6 +9,9 @@ __pycache__/
 .env
 .env.*
 secrets.local.json
+secrets.local.json.*.tmp
+gpt_api.txt
+claude_api.txt
 config.json
 delivery.json
 .window-relay/

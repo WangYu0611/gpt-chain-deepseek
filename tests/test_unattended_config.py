@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from unattended import config
+from unattended.secrets import read_secret, validate_api_base_url
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -40,6 +41,53 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(loaded["dsh"]["home"], str(self.path.parent / "dsh-home"))
         self.assertEqual(loaded["dsh"]["patches"], [str(self.path.parent / "account.yml")])
         self.assertEqual(loaded["config_path"], str(self.path))
+
+    def test_shared_secrets_resolve_against_config_and_stay_outside_model_workspaces(self):
+        shared = self.root / "private" / "secrets.local.json"
+        shared.parent.mkdir()
+        shared.write_text(json.dumps({"ANTHROPIC_API_KEY": "synthetic-anthropic-key"}), encoding="utf-8")
+        self.value["secrets_file"] = "../private/secrets.local.json"
+        loaded = config.load_config(self.save())
+        self.assertEqual(loaded["secrets_file"], str(shared))
+        self.assertEqual(read_secret("ANTHROPIC_API_KEY", config_path=self.path), "synthetic-anthropic-key")
+        for location in (self.project / "secrets.local.json", self.path.parent / "runtime/workspace/secrets.local.json",
+                         self.path.parent / "runtime/private/secrets.local.json"):
+            self.value["secrets_file"] = str(location)
+            with self.subTest(location=location), self.assertRaisesRegex(ValueError, "工作目录之外"):
+                config.load_config(self.save())
+
+    def test_large_source_config_routes_to_a_bounded_secrets_file(self):
+        self.value.update(secrets_file="../secrets.local.json", goal="项目需求" * 30000)
+        config.load_config(self.save())
+        shared = self.root / "secrets.local.json"
+        shared.write_text(json.dumps({"CODEX_API_KEY": "synthetic-codex-key"}), encoding="utf-8")
+        self.assertEqual(read_secret("CODEX_API_KEY", config_path=self.path), "synthetic-codex-key")
+        shared.write_text(json.dumps({"CODEX_API_KEY": "x" * 65537}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "本地密钥文件"):
+            read_secret("CODEX_API_KEY", config_path=self.path)
+
+    def test_secret_errors_hide_credentials(self):
+        shared = self.root / "secrets.local.json"
+        shared.write_text('{"CODEX_API_KEY": "synthetic-secret"', encoding="utf-8")
+        with self.assertRaises(ValueError) as raised:
+            read_secret("CODEX_API_KEY", secrets_path=shared)
+        self.assertNotIn("synthetic-secret", str(raised.exception))
+
+    def test_api_endpoint_validation_excludes_embedded_secrets_and_controls(self):
+        self.assertEqual(validate_api_base_url("https://api.example.test/v1/"), "https://api.example.test/v1")
+        for value in ("http://api.example.test", "https://user:synthetic-secret@api.example.test",
+                      "https://api.example.test?token=synthetic-secret", "https://api.example.test#fragment",
+                      "https://api.example.test\n", "https://api.example.test:invalid", "https://"):
+            with self.subTest(value=value), self.assertRaises(ValueError) as raised:
+                validate_api_base_url(value)
+            self.assertNotIn("synthetic-secret", str(raised.exception))
+
+    def test_claude_auth_mode_is_explicit_and_validated(self):
+        self.value.update(planning_provider="claude", claude={"command": ["claude.exe"], "auth_mode": "api_key"})
+        self.assertEqual(config.load_config(self.save())["claude"]["auth_mode"], "api_key")
+        self.value["claude"]["auth_mode"] = "other"
+        with self.assertRaisesRegex(ValueError, "claude.auth_mode"):
+            config.load_config(self.save())
 
     def test_explicit_models_and_reasoning_survive_loading(self):
         self.value["codex"].update(model="gpt-6-astra", reasoning_effort="high")
@@ -201,6 +249,27 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["checks"]["codex_available"])
         self.assertFalse(result["checks"]["dsh_available"])
+
+    def test_doctor_checks_shared_claude_api_credentials_without_exposing_them(self):
+        self.value.update(planning_provider="claude", coding_provider="claude",
+                          claude={"command": ["claude.exe"], "auth_mode": "api_key"},
+                          secrets_file="../secrets.local.json")
+        candidate = config.load_config(self.save())
+        shared = Path(candidate["secrets_file"])
+        with patch.object(config.gitops, "head", return_value="a" * 40), \
+             patch.object(config.gitops, "git", return_value="identity"), \
+             patch.object(config.shutil, "which", return_value="native.exe"), \
+             patch.dict("os.environ", {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "", "ANTHROPIC_BASE_URL": ""}):
+            self.assertFalse(config.doctor(candidate)["checks"]["claude_api_key_configured"])
+            for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+                with self.subTest(name=name):
+                    shared.write_text(json.dumps({name: "synthetic-anthropic-key"}), encoding="utf-8")
+                    result = config.doctor(candidate)
+                    self.assertTrue(result["checks"]["claude_api_key_configured"])
+                    self.assertNotIn("synthetic-anthropic-key", json.dumps(result))
+            shared.write_text(json.dumps({"ANTHROPIC_AUTH_TOKEN": "synthetic-anthropic-key",
+                                          "ANTHROPIC_BASE_URL": "https://host.invalid?token=private"}), encoding="utf-8")
+            self.assertFalse(config.doctor(candidate)["checks"]["claude_api_key_configured"])
 
 
 if __name__ == "__main__":

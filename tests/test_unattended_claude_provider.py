@@ -13,7 +13,7 @@ from unittest.mock import patch
 from github_harness_lab.lab_harness.process import ProcessResult, safe_environment
 from tests.test_unattended_providers import write_events
 from unattended.providers import (
-    AgentProviders, ProviderError, _claude_log_record, _claude_validation_read_directory,
+    AgentProviders, ProviderError, _claude_environment, _claude_log_record, _claude_validation_read_directory,
     claude_subscription_ready, classify_transient_failure, read_session,
 )
 
@@ -172,6 +172,84 @@ class ClaudeCodeTests(unittest.TestCase):
             launch.return_value = SimpleNamespace(returncode=0, stdout=json.dumps(
                 dict(safe, authMethod="api_key")).encode())
             self.assertFalse(claude_subscription_ready(self.settings, self.root))
+
+    def test_api_environment_prefers_central_credentials_and_supports_token_and_endpoint(self):
+        central = self.root / "operator-secrets.json"
+        config_path = self.root / "nested" / "unattended.json"
+        settings = dict(self.settings, auth_mode="api_key")
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            with self.subTest(credential=name), patch.dict(os.environ, {
+                    "ANTHROPIC_API_KEY": "stale-api-key", "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                    "ANTHROPIC_BASE_URL": "https://stale.invalid", "GITHUB_TOKEN": "unrelated-publisher-token"}):
+                central.write_text(json.dumps({name: "central-credential", "ANTHROPIC_BASE_URL": "https://api.example.test/v1"}),
+                                   encoding="utf-8")
+                environment = _claude_environment(settings, config_path=config_path, secrets_file=central)
+                self.assertEqual(environment[name], "central-credential")
+                self.assertEqual(environment["ANTHROPIC_BASE_URL"], "https://api.example.test/v1")
+                other = "ANTHROPIC_AUTH_TOKEN" if name == "ANTHROPIC_API_KEY" else "ANTHROPIC_API_KEY"
+                self.assertNotIn(other, environment)
+                self.assertNotIn("GITHUB_TOKEN", environment)
+                self.assertEqual(environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "1")
+        central.write_text(json.dumps({"ANTHROPIC_API_KEY": "central-credential"}), encoding="utf-8")
+        with patch.dict(os.environ, {"ANTHROPIC_BASE_URL": "https://stale.invalid"}):
+            environment = _claude_environment(settings, config_path=config_path, secrets_file=central)
+            self.assertNotIn("ANTHROPIC_BASE_URL", environment)
+
+    def test_api_authentication_missing_or_invalid_credentials_stop_before_launch(self):
+        self.settings["auth_mode"] = "api_key"
+        with patch.dict(os.environ, {}, clear=True), \
+                patch("unattended.providers.claude_subscription_ready") as subscription, \
+                patch("unattended.providers.run_process") as launch:
+            with self.assertRaisesRegex(ProviderError, "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"):
+                self.provider.code("Continue", self.root, self.out, 30)
+            subscription.assert_not_called()
+            launch.assert_not_called()
+        for endpoint in ("https://user:password@example.test", "https://example.test?key=private", "file:///private"):
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, {
+                    "ANTHROPIC_API_KEY": "test-credential", "ANTHROPIC_BASE_URL": endpoint}, clear=True):
+                with self.assertRaisesRegex(ProviderError, "ANTHROPIC_BASE_URL"):
+                    _claude_environment(self.settings)
+
+    def test_api_code_redacts_credentials_in_real_capture_without_subscription_or_settings_key(self):
+        script = self.root / "fake_claude.py"
+        script.write_text(
+            "import json, os, sys\n"
+            f"session = {SESSION!r}\n"
+            "key = os.environ.get('ANTHROPIC_API_KEY') or os.environ['ANTHROPIC_AUTH_TOKEN']\n"
+            "print(json.dumps(dict(type='system', subtype='init', session_id=session)), flush=True)\n"
+            "print(json.dumps(dict(type='result', subtype='success', session_id=session, is_error=False, result=key)), flush=True)\n"
+            "print(key, file=sys.stderr, flush=True)\n", encoding="utf-8")
+        self.settings.update(auth_mode="api_key", command=[sys.executable, str(script)])
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            self.out = self.root / name
+            key = "test-private-anthropic-credential-123456"
+            with self.subTest(credential=name), patch.dict(os.environ, {name: key}, clear=True), \
+                    patch("unattended.providers.claude_subscription_ready") as subscription:
+                result = self.provider.code("Implement", self.root, self.out, 30)
+                self.assertTrue(result["completed"])
+                subscription.assert_not_called()
+                for artifact in self.out.iterdir():
+                    self.assertNotIn(key, artifact.read_text(encoding="utf-8"))
+                self.assertIn("[REDACTED]", (self.out / "stderr.log").read_text(encoding="utf-8"))
+                self.assertIn("[REDACTED]", (self.out / "stdout.log").read_text(encoding="utf-8"))
+
+    @patch("unattended.providers.claude_subscription_ready")
+    @patch("unattended.providers.run_process")
+    def test_api_code_passes_key_only_in_environment_and_redaction_list(self, launch, subscription):
+        key = "test-anthropic-secret"
+        self.settings["auth_mode"] = "api_key"
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": key}, clear=True):
+            launch.side_effect = lambda *args, **kwargs: self.capture(events())
+            self.provider.code("Implement", self.root, self.out, 30)
+        argv = launch.call_args.args[0]
+        policy = json.loads(argv[argv.index("--settings") + 1])
+        self.assertNotIn("forceLoginMethod", policy)
+        self.assertNotIn("apiKey", policy)
+        self.assertNotIn(key, json.dumps(argv))
+        self.assertNotIn(key, launch.call_args.kwargs["stdin"].decode())
+        self.assertEqual(launch.call_args.kwargs["environment"]["ANTHROPIC_API_KEY"], key)
+        self.assertIn(key, launch.call_args.kwargs["secrets"])
+        subscription.assert_not_called()
 
     @patch("unattended.providers.claude_subscription_ready", return_value=True)
     @patch("unattended.providers.run_process")

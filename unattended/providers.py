@@ -28,7 +28,7 @@ from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import ue_checks
 from .config import (ART_CODING_MODEL, ART_CODING_REASONING_EFFORT,
                      validate_art_pipeline_settings, validate_model_settings)
-from .secrets import read_secret
+from .secrets import read_secret, validate_api_base_url
 from .storage import atomic_replace
 
 
@@ -134,6 +134,7 @@ _CODEX_API_BILLING_CODES = frozenset({
     "credit_balance_exhausted", "insufficient_quota", "organization_spend_limit_exceeded",
     "organization_usage_limit_exceeded", "project_spend_limit_exceeded",
 })
+_CODEX_API_PROMO_RESTRICTION_CODE = "codex_byok_restricted_by_api_credit_promo"
 _CODEX_API_QUOTA_TEXT = "Quota exceeded. Check your plan and billing details."
 _CODEX_HTTP_429 = re.compile(r"unexpected status 429(?: Too Many Requests)?: (?=\{)")
 _CODEX_SUBSCRIPTION_LIMIT_TEXT = re.compile(
@@ -250,6 +251,8 @@ def _failure_events(path: Path, kind: str) -> tuple[list[dict], bool, str]:
 
 
 def _codex_api_billing_error(error: dict) -> bool:
+    if error.get("code") == _CODEX_API_PROMO_RESTRICTION_CODE:
+        return True
     status = error.get("status", error.get("status_code"))
     if status is not None and status not in {429, "429"}:
         return False
@@ -268,7 +271,11 @@ def _codex_api_billing_error(error: dict) -> bool:
         return True
     prefix = _CODEX_HTTP_429.match(message)
     if prefix is None:
-        return False
+        if not message.startswith("{"):
+            return False
+        envelope = _strict_json(message)
+        inner = envelope.get("error") if type(envelope) is dict else None
+        return type(inner) is dict and inner.get("code") == _CODEX_API_PROMO_RESTRICTION_CODE
     body = message[prefix.end():]
     _, end = json.JSONDecoder().raw_decode(body)
     suffix = body[end:].strip()
@@ -1031,8 +1038,10 @@ def _command(value: Any, default: list[str]) -> list[str]:
 
 
 def _claude_command(settings: dict, *, read_only_dirs: list[Path] | None = None) -> list[str]:
-    policy = {"forceLoginMethod": "claudeai", "disableAllHooks": True,
+    policy = {"disableAllHooks": True,
               "permissions": {"blockReadsOutsideWorkingDirectories": True}}
+    if settings.get("auth_mode", "subscription") == "subscription":
+        policy["forceLoginMethod"] = "claudeai"
     if read_only_dirs:
         deny = []
         for path in read_only_dirs:
@@ -1781,12 +1790,42 @@ def _claude_validation_read_directory(config: dict, cwd: Path, out: Path) -> Pat
         return None
 
 
-def _claude_environment() -> dict[str, str]:
-    # Login is owned by the native CLI. Do not pass API keys, gateways, cloud
-    # provider selectors, or overrides that point it at another credential store.
+def _claude_environment(settings: dict | None = None, *, config_path: str | Path | None = None,
+                        secrets_file: str | Path | None = None) -> dict[str, str]:
     environment = safe_environment()
     environment.update({key: os.environ[key] for key in _CLAUDE_ENV if os.environ.get(key)})
     environment["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] = "1"
+    mode = (settings or {}).get("auth_mode", "subscription")
+    if mode == "subscription":
+        return environment
+    if mode != "api_key":
+        raise ProviderError("Claude auth_mode must be subscription or api_key")
+    names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
+    values = {name: read_secret(name, config_path=config_path, secrets_file=secrets_file) for name in names}
+    credential = next((name for name in names[:2] if values[name]), None)
+    central_credential = credential is not None
+    if credential is None:
+        credential = next((name for name in names[:2] if os.environ.get(name)), None)
+    if credential is None:
+        raise ProviderError("Claude API authentication requires ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN")
+    value = values[credential] or os.environ[credential].strip()
+    if not value or len(value) > 4096 or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ProviderError("Claude API credential has an invalid format")
+    environment[credential] = value
+    base_url = values["ANTHROPIC_BASE_URL"] or (None if central_credential else os.environ.get("ANTHROPIC_BASE_URL"))
+    if base_url:
+        try:
+            environment["ANTHROPIC_BASE_URL"] = validate_api_base_url(base_url)
+        except ValueError:
+            raise ProviderError("Claude ANTHROPIC_BASE_URL must be an HTTPS endpoint without credentials or query") from None
+    return environment
+
+
+def _claude_authentication(settings: dict, cwd: Path, *, config_path: str | Path | None = None,
+                           secrets_file: str | Path | None = None) -> dict[str, str]:
+    environment = _claude_environment(settings, config_path=config_path, secrets_file=secrets_file)
+    if settings.get("auth_mode", "subscription") == "subscription" and not claude_subscription_ready(settings, cwd):
+        raise ProviderError("Claude requires an active native Claude Pro login")
     return environment
 
 
@@ -1863,11 +1902,12 @@ def _codex_command(value: Any) -> list[str]:
                         transient=True, retry_reason="local_cli_unavailable")
 
 
-def _codex_api_key(config_path: str | Path | None = None) -> str | None:
-    """Read the operator's named variable even when Task Scheduler has an old environment."""
-    value = os.environ.get("CODEX_API_KEY")
+def _codex_api_key(config_path: str | Path | None = None, *,
+                   secrets_file: str | Path | None = None) -> str | None:
+    """Prefer current local settings over a background process's inherited key."""
+    value = read_secret("CODEX_API_KEY", config_path=config_path, secrets_file=secrets_file)
     if not value:
-        value = read_secret("CODEX_API_KEY", config_path=config_path)
+        value = os.environ.get("CODEX_API_KEY")
     if not value and os.name == "nt":
         import winreg
         try:
@@ -1962,15 +2002,18 @@ class AgentProviders:
         environment = safe_environment()
         auth_variables = ("CODEX_HOME", "NODE_EXTRA_CA_CERTS")
         if auth_mode == "api_key":
-            key = _codex_api_key(self.config.get("config_path"))
+            key = _codex_api_key(self.config.get("config_path"), secrets_file=self.config.get("secrets_file"))
             if not key:
                 raise ProviderError("CODEX_API_KEY is required for API-authenticated planning and review")
+            base_url = validate_api_base_url(read_secret(
+                "CODEX_BASE_URL", config_path=self.config.get("config_path"),
+                secrets_file=self.config.get("secrets_file")) or "https://api.openai.com/v1")
             environment["CODEX_API_KEY"] = key
             # The built-in provider can follow a saved ChatGPT login even
             # when CODEX_API_KEY is present. Bind this request to the key.
             argv.extend(["-c", 'model_provider="unattended_openai_api"',
                          "-c", 'model_providers.unattended_openai_api={name="OpenAI API",'
-                               'base_url="https://api.openai.com/v1",env_key="CODEX_API_KEY",'
+                               'base_url=' + json.dumps(base_url) + ',env_key="CODEX_API_KEY",'
                                'requires_openai_auth=false,wire_api="responses"}',
                          "-c", 'shell_environment_policy.filters={CODEX_API_KEY="exclude",OPENAI_API_KEY="exclude"}',
                          "-c", "shell_environment_policy.ignore_default_excludes=false"])
@@ -2110,8 +2153,8 @@ class AgentProviders:
             raise ProviderError(str(error)) from error
         if settings.get("plan_instructions"):
             prompt += "\n" + str(settings["plan_instructions"])
-        if not claude_subscription_ready(settings, cwd):
-            raise ProviderError("Claude planning requires an active native Claude Pro login")
+        environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
+                                              secrets_file=self.config.get("secrets_file"))
         out = Path(out).resolve()
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
@@ -2148,7 +2191,7 @@ class AgentProviders:
             argv.extend(["--model", settings["model"]])
         if settings.get("reasoning_effort"):
             argv.extend(["--effort", settings["reasoning_effort"]])
-        self._invoke("plan", argv, prompt, Path(cwd), out, timeout, _claude_environment(),
+        self._invoke("plan", argv, prompt, Path(cwd), out, timeout, environment,
                      planning_provider="claude", planning_model=settings.get("model"),
                      planning_reasoning_effort=settings.get("reasoning_effort"))
         recovered = self.recover("plan", out)
@@ -2165,8 +2208,8 @@ class AgentProviders:
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
         settings = dict(self.config.get("claude", {}))
         settings.update(model=ART_CODING_MODEL, reasoning_effort=ART_CODING_REASONING_EFFORT)
-        if not claude_subscription_ready(settings, cwd):
-            raise ProviderError("Claude art diagnosis requires an active native Claude Pro login")
+        environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
+                                              secrets_file=self.config.get("secrets_file"))
         prompt += (
             "\n这是原制作会话的只读诊断分支，不能修改文件、执行命令、制作资产、提交或批准验收。"
             "仅结合当前任务证据，说明失败原因及你在现有艺术方向、预算、批次、工具和审批权限内的下一步计划；"
@@ -2187,7 +2230,7 @@ class AgentProviders:
                      "--resume", session_id, "--fork-session",
                      "--model", ART_CODING_MODEL, "--effort", ART_CODING_REASONING_EFFORT,
                      "--json-schema", json.dumps(ART_DIAGNOSE_SCHEMA, separators=(",", ":"))])
-        self._invoke("art_diagnose", argv, prompt, cwd, out, timeout, _claude_environment(),
+        self._invoke("art_diagnose", argv, prompt, cwd, out, timeout, environment,
                      requested_session=session_id, diagnosis_binding=binding,
                      strict_model_selection=True)
         recovered = self.recover("art_diagnose", out)
@@ -2242,8 +2285,8 @@ class AgentProviders:
                 "/validation-results.json 摘要定位失败。仅据本轮实际日志修复，验证回执和外层日志由调度器维护。\n"
             )
         prompt += "\n交付摘要只写变更要点、提交号、验证结果及证据路径。不要粘贴源码或完整命令输出。"
-        if not claude_subscription_ready(settings, cwd):
-            raise ProviderError("Claude Code requires an active native Claude Pro login")
+        environment = _claude_authentication(settings, cwd, config_path=self.config.get("config_path"),
+                                              secrets_file=self.config.get("secrets_file"))
         working_directory = Path(cwd).resolve()
         external = [path for path in dict.fromkeys(path.resolve() for path in directories)
                     if not path.is_relative_to(working_directory)]
@@ -2277,7 +2320,6 @@ class AgentProviders:
         if settings.get("reasoning_effort"):
             argv.extend(["--effort", settings["reasoning_effort"]])
         out.mkdir(parents=True, exist_ok=True)
-        environment = _claude_environment()
         if repair_context is not None:
             environment.pop("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", None)
         self._invoke("code", argv, prompt, Path(cwd), out, timeout, environment,
@@ -2308,7 +2350,8 @@ class AgentProviders:
         # A reused invocation directory must never re-run an external action.
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
-        secrets = [environment[key] for key in ("CODEX_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY")
+        secrets = [environment[key] for key in ("CODEX_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
+                                                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
                    if environment.get(key)]
         receipt_fields = {"coding_provider": coding_provider} if coding_provider else {}
         if coding_model is not None:

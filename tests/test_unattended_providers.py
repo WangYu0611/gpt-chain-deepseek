@@ -8,13 +8,21 @@ import unittest
 from unittest.mock import patch
 
 from github_harness_lab.lab_harness.process import ProcessResult
-from unattended.providers import (AgentProviders, ProviderError, classify_transient_failure,
+from unattended.providers import (AgentProviders, ProviderError, _codex_api_key, classify_transient_failure,
                                   parse_codex_events, read_session, validate_output)
 
 
 PLAN = {"action": "task", "title": "Implement a feature", "body": "Make the requested change.",
         "acceptance_criteria": ["The required check passes"], "reason": "Next step"}
 REVIEW = {"decision": "accepted", "summary": "Checked the change", "feedback": "", "head_sha": "a" * 40}
+PROMO_RESTRICTION_MESSAGE = '''{
+  "error": {
+    "code": "codex_byok_restricted_by_api_credit_promo",
+    "message": "This organization cannot be used for Codex usage because it is enrolled in the monthly API Credits benefit with ChatGPT subscriptions. To enable Codex usage, an Organization Owner must cancel the benefit on https://platform.openai.com/settings/organization/billing/overview.",
+    "param": null,
+    "type": "invalid_request_error"
+  }
+}'''
 CODEX_EVENTS = [
     {"type": "thread.started", "thread_id": "0199abc-def"},
     {"type": "turn.started"},
@@ -122,7 +130,7 @@ class ProviderTests(unittest.TestCase):
             "CODEX_API_KEY": "synthetic-codex-secret",
             "DEEPSEEK_API_KEY": "synthetic-deepseek-secret",
         }), encoding="utf-8")
-        with patch.dict("os.environ", {"CODEX_API_KEY": "", "DEEPSEEK_API_KEY": ""}):
+        with patch.dict("os.environ", {"CODEX_API_KEY": "stale-background-secret", "DEEPSEEK_API_KEY": ""}):
             process.side_effect = self.fake_codex
             self.providers.plan("Plan", self.root, self.root / "plan", 30)
             codex = process.call_args.kwargs
@@ -139,7 +147,7 @@ class ProviderTests(unittest.TestCase):
 
     @patch("unattended.providers._codex_api_key", return_value="synthetic-api-test-secret")
     @patch("unattended.providers.run_process")
-    def test_api_auth_keeps_key_out_of_argv_and_forces_the_official_endpoint(self, process, key):
+    def test_api_auth_keeps_key_out_of_argv_and_defaults_to_the_official_endpoint(self, process, key):
         self.providers.config["codex"]["auth_mode"] = "api_key"
         process.side_effect = self.fake_codex
         with patch.dict("os.environ", {"OPENAI_API_KEY": "unrelated-test-secret",
@@ -157,6 +165,50 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(environment["CODEX_API_KEY"], key.return_value)
         self.assertNotIn(key.return_value, " ".join(argv))
         self.assertEqual(process.call_args.kwargs["secrets"], [key.return_value])
+
+    @patch("unattended.providers.run_process")
+    def test_api_auth_uses_shared_local_key_and_endpoint_over_stale_environment(self, process):
+        shared = self.root / "private" / "secrets.local.json"
+        shared.parent.mkdir()
+        shared.write_text(json.dumps({"CODEX_API_KEY": "current-shared-test-key",
+                                      "CODEX_BASE_URL": "https://gateway.invalid/v1"}), encoding="utf-8")
+        self.providers.config.update(config_path=str(self.root / "worker" / "config.json"),
+                                     secrets_file=str(shared))
+        self.providers.config["codex"]["auth_mode"] = "api_key"
+        process.side_effect = self.fake_codex
+        with patch.dict("os.environ", {"CODEX_API_KEY": "stale-background-secret",
+                                        "OPENAI_BASE_URL": "https://stale.invalid"}):
+            self.providers.review("Review", self.root, self.root / "shared-review", 30)
+        argv = process.call_args.args[0]
+        provider = next(arg for arg in argv if arg.startswith("model_providers.unattended_openai_api="))
+        self.assertIn('base_url="https://gateway.invalid/v1"', provider)
+        self.assertEqual(process.call_args.kwargs["environment"]["CODEX_API_KEY"], "current-shared-test-key")
+        self.assertNotIn("current-shared-test-key", " ".join(argv))
+        self.assertNotIn("stale-background-secret", process.call_args.kwargs["environment"].values())
+        self.assertEqual(process.call_args.kwargs["secrets"], ["current-shared-test-key"])
+
+    def test_codex_api_key_reads_explicit_shared_file_and_preserves_environment_fallback(self):
+        shared = self.root / "shared.json"
+        shared.write_text(json.dumps({"CODEX_API_KEY": "shared-test-key"}), encoding="utf-8")
+        with patch.dict("os.environ", {"CODEX_API_KEY": "environment-test-key"}):
+            self.assertEqual(_codex_api_key(secrets_file=shared), "shared-test-key")
+            shared.write_text("{}", encoding="utf-8")
+            self.assertEqual(_codex_api_key(secrets_file=shared), "environment-test-key")
+
+    @patch("unattended.providers.run_process")
+    def test_api_auth_rejects_unsafe_configured_endpoints_before_launching(self, process):
+        self.providers.config["config_path"] = str(self.root / "unattended.local.json")
+        self.providers.config["codex"]["auth_mode"] = "api_key"
+        for index, endpoint in enumerate(("http://gateway.invalid/v1", "https://user:password@gateway.invalid/v1",
+                                           "https://gateway.invalid/v1?token=secret")):
+            with self.subTest(endpoint=endpoint):
+                (self.root / "secrets.local.json").write_text(json.dumps({
+                    "CODEX_API_KEY": "synthetic-api-key", "CODEX_BASE_URL": endpoint}), encoding="utf-8")
+                with self.assertRaises(ValueError) as failure:
+                    self.providers.review("Review", self.root, self.root / f"invalid-endpoint-{index}", 30)
+                self.assertNotIn("synthetic-api-key", str(failure.exception))
+                self.assertNotIn(endpoint, str(failure.exception))
+        process.assert_not_called()
 
     @patch("unattended.providers._codex_api_key", return_value=None)
     @patch("unattended.providers.run_process")
@@ -178,6 +230,8 @@ class ProviderTests(unittest.TestCase):
                 ({"message": "Quota exceeded. Check your plan and billing details."}, LARGE_CODEX_TOOL_EVENTS),
                 ({"message": ('unexpected status 429 Too Many Requests: {"error": '
                               '{"code": "organization_spend_limit_exceeded"}}, url: https://api.openai.com/v1/responses')}, ()),
+                ({"code": "codex_byok_restricted_by_api_credit_promo", "type": "invalid_request_error"}, ()),
+                ({"message": PROMO_RESTRICTION_MESSAGE}, ({"type": "error", "message": PROMO_RESTRICTION_MESSAGE},)),
         )):
             with self.subTest(error=error):
                 process.reset_mock()
@@ -219,6 +273,8 @@ class ProviderTests(unittest.TestCase):
             ({"status": 429}, (), False, "rate_limited"),
             ({"status": 503}, (), False, "server_unavailable"),
             ({"status": 401, "code": "invalid_api_key"}, (), False, None),
+            ({"message": PROMO_RESTRICTION_MESSAGE.replace("codex_byok_restricted_by_api_credit_promo", "invalid_api_key")}, (), False, None),
+            ({"message": "The error mentions codex_byok_restricted_by_api_credit_promo in prose"}, (), False, None),
             ({"status": 429, "code": "slow_down", "type": "insufficient_quota"}, (), False, "rate_limited"),
             ({"message": "your project quota may be exceeded"}, (), False, None),
             ({"status": 429}, ({"type": "item.completed", "item": {"text": "insufficient_quota"}},), False, "rate_limited"),
@@ -240,6 +296,20 @@ class ProviderTests(unittest.TestCase):
         process.side_effect = self.fake_codex
         self.assertEqual(self.providers.plan("Plan", self.root, self.root / "api-restored", 30), PLAN)
         self.assertEqual(process.call_count, 1)
+        login.assert_not_called()
+
+    @patch("unattended.providers._codex_api_key", return_value="synthetic-api-test-secret")
+    @patch("unattended.providers.subprocess.run")
+    @patch("unattended.providers.run_process")
+    def test_promo_restriction_preserves_api_failure_when_subscription_fallback_is_disabled(self, process, login, _key):
+        self.providers.config["codex"].update(auth_mode="api_key", subscription_fallback=False)
+        process.side_effect = lambda _argv, **kwargs: self.fake_codex_failure(
+            kwargs["output_dir"], {"message": PROMO_RESTRICTION_MESSAGE})
+        out = self.root / "promo-without-fallback"
+        with self.assertRaises(ProviderError):
+            self.providers.review("Review", self.root, out, 30)
+        self.assertEqual(process.call_count, 1)
+        self.assertFalse((out / "codex-subscription").exists())
         login.assert_not_called()
 
     @patch("unattended.providers._codex_api_key", return_value="synthetic-api-test-secret")
