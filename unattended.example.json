@@ -1,6 +1,7 @@
 {
   "version": 1,
   "codex_only": true,
+  "headless": true,
   "planning_provider": "codex",
   "coding_provider": "codex",
   "project_path": "C:/Projects/REPLACE_WITH_PROJECT",

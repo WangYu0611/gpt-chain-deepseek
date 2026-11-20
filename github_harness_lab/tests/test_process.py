@@ -85,6 +85,57 @@ class ProcessTests(unittest.TestCase):
 class WindowsLaunchTests(unittest.TestCase):
     run_code = ProcessTests.run_code
 
+    def test_private_desktop_contains_gui_descendants_and_preserves_pipes(self):
+        identify = '''
+import ctypes as C
+from ctypes import wintypes as W
+u = C.WinDLL("user32", use_last_error=True)
+k = C.WinDLL("kernel32")
+u.GetThreadDesktop.argtypes = [W.DWORD]
+u.GetThreadDesktop.restype = W.HANDLE
+u.GetUserObjectInformationW.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.c_void_p]
+name = C.create_unicode_buffer(256)
+assert u.GetUserObjectInformationW(u.GetThreadDesktop(k.GetCurrentThreadId()),
+                                   2, name, C.sizeof(name), None)
+assert name.value.startswith("CodexUnattended-")
+'''
+        code = identify + '''
+import subprocess, sys
+u.CreateWindowExW.argtypes = [W.DWORD, W.LPCWSTR, W.LPCWSTR, W.DWORD, C.c_int, C.c_int,
+                              C.c_int, C.c_int, W.HWND, W.HMENU, W.HINSTANCE, C.c_void_p]
+u.CreateWindowExW.restype = W.HWND
+u.DestroyWindow.argtypes = [W.HWND]
+window = u.CreateWindowExW(0, "STATIC", "Private desktop test", 0x10CF0000,
+                           0, 0, 160, 90, None, None, None, None)
+assert window
+try:
+    print("root", name.value)
+    child = subprocess.run([sys.executable, "-c", ''' + repr(identify + 'print(name.value)') + '''],
+                           capture_output=True, text=True, timeout=8, check=True)
+    print("descendant", child.stdout.strip())
+    print("input", sys.stdin.read())
+    print("separate stderr", file=sys.stderr)
+finally:
+    u.DestroyWindow(window)
+sys.exit(7)
+'''
+        result = self.run_code(code, private_desktop=True, stdin=b"safe input")
+        self.assertEqual(result.exit_code, 7, result.stderr_path.read_text())
+        root, descendant, received = result.stdout_path.read_text().splitlines()
+        self.assertEqual(root.split()[1], descendant.split()[1])
+        self.assertEqual(received, "input safe input")
+        self.assertEqual(result.stderr_path.read_text().strip(), "separate stderr")
+
+    def test_private_desktop_timeout_still_terminates_the_process_tree(self):
+        child = "import time; time.sleep(1.5); open('escaped-private-child','w').write('bad')"
+        code = ("import subprocess,sys,time; subprocess.Popen([sys.executable,'-c'," + repr(child) +
+                "]); print('child spawned', flush=True); time.sleep(10)")
+        result = self.run_code(code, private_desktop=True, timeout_seconds=1)
+        self.assertIn("child spawned", result.stdout_path.read_text(), result.stderr_path.read_text())
+        self.assertTrue(result.timed_out)
+        time.sleep(0.7)
+        self.assertFalse((Path(self.temp.name) / "escaped-private-child").exists())
+
     def thread_kernel(self, owners, *, actual_owner=123, suspended=1):
         entries = iter(enumerate(owners, 200))
 

@@ -309,6 +309,8 @@ def load_config(path: Path) -> dict:
         raise ValueError("planning_provider 必须为 codex 或 claude。")
     if type(config.get("codex_only", False)) is not bool or (config.get("codex_only") and (planner != "codex" or coder != "codex")):
         raise ValueError("codex_only 必须为布尔值，启用时规划和编码均须为 codex。")
+    if type(config.get("headless", False)) is not bool:
+        raise ValueError("headless 必须为布尔值。")
     for key in dict.fromkeys(("codex", planner, coder)):
         if not isinstance(config.get(key), dict):
             raise ValueError(f"缺少 {key} 配置。")
@@ -348,6 +350,8 @@ def load_config(path: Path) -> dict:
         raise ValueError("codex.planned_core_tests 必须为布尔值。")
     if type(codex.get("tiered_planning", False)) is not bool:
         raise ValueError("codex.tiered_planning 必须为布尔值。")
+    if config.get("headless") and os.name == "nt":
+        codex.setdefault("windows_sandbox", "unelevated")
     if "windows_sandbox" in codex and codex["windows_sandbox"] not in ("unelevated", "elevated", "mxc"):
         raise ValueError("codex.windows_sandbox 必须为 unelevated、elevated 或 mxc。")
     if codex.get("planned_core_tests") and not {"ue-editor-build", "ue-task-validation"} <= {check["id"] for check in config["checks"]}:

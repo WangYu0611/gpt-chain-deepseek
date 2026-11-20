@@ -988,6 +988,14 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             prompt += "Codex 在独立会话中分别负责规划、编码与本地提交、独立验收。\n"
         if self.config.get("codex_only"):
             prompt += "按用户最新分工，Codex 承担项目所有模型职责。旧文档中的执行方分工以当前约定为准。\n"
+        if self.config.get("headless"):
+            prompt += (
+                "当前流程必须全程无人值守。只使用终端和可无人交互的自动化工具，禁止打开桌面窗口、浏览器或系统对话框。"
+                "UE 自动验证使用 UnrealEditor-Cmd.exe 与 -unattended -RenderOffScreen，"
+                "通过引擎内自动化操作玩家界面并保存证据。要验证实际画面时使用正常 RHI 离屏渲染，"
+                "用程序化输入走正式界面控件，生成真实帧和运行日志。NullRHI 只验证逻辑与控件状态。"
+                "规划时将依赖实体显示或人工输入的验证列为人工验收项。"
+                "暂时无法自动执行的检查记录 NOT_RUN，并保留相关验收状态和证据要求。\n")
         if coder == "claude":
             prompt += "历史任务书、反馈和文档中的 DSH 开发职责由 CC 接续。\n"
         elif coder == "codex":
@@ -1419,7 +1427,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                                                network_file=self.config.get("network_file")))
         directory = Path(op["output_dir"]) / ("preview-" + uuid.uuid4().hex)
         result = run_process(argv, cwd=work, output_dir=directory, timeout_seconds=timeout,
-                             environment=environment, max_output_bytes=16 * 1024 * 1024)
+                             environment=environment, max_output_bytes=16 * 1024 * 1024,
+                             private_desktop=self.config.get("headless", False))
         if result.timed_out and window_limited:
             raise gitops.WindowClosed("美术预览达到工作窗口截止时间。")
         if result.exit_code != 0 or result.timed_out or result.output_limit_exceeded:
@@ -1681,7 +1690,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             self._save(state)
             argv = [x.replace("{workspace}", str(work)).replace("{runtime}", str(self.runtime)) for x in check["argv"]]
             process = run_process(argv, cwd=work, output_dir=directory, timeout_seconds=timeout,
-                                  environment=safe_environment(), max_output_bytes=16 * 1024 * 1024)
+                                  environment=safe_environment(), max_output_bytes=16 * 1024 * 1024,
+                                  private_desktop=self.config.get("headless", False))
             if process.timed_out and window_limited:
                 state["operation"] = None
                 self._save(state)

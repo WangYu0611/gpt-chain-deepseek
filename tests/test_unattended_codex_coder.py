@@ -43,6 +43,7 @@ class CodexCoderTests(unittest.TestCase):
         return ProcessResult(self.exit_code, False, False, out / "stdout.log", out / "stderr.log")
 
     def test_regular_code_uses_native_subscription_and_dedicated_coding_model(self):
+        self.config["headless"] = True
         self.config["codex"]["windows_sandbox"] = "unelevated"
         with patch.dict(os.environ, {"CODEX_API_KEY": "private-api-key", "OPENAI_API_KEY": "private-openai-key"}):
             result = self.provider.code("Implement the task", self.root, self.out, 60)
@@ -52,6 +53,9 @@ class CodexCoderTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--model") + 1], "gpt-6.2-sol")
         self.assertIn('model_reasoning_effort="high"', argv)
         self.assertEqual('windows.sandbox="unelevated"' in argv, os.name == "nt")
+        self.assertIn("--ignore-user-config", argv)
+        self.assertEqual([argv[i + 1] for i, value in enumerate(argv) if value == "--disable"],
+                         ["apps", "computer_use"])
         self.assertIn('forced_login_method="chatgpt"', argv)
         self.assertNotIn("resume", argv)
         environment = self.launch.call_args.kwargs["environment"]

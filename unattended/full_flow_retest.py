@@ -146,10 +146,13 @@ def _forced_rhi_correction(flow, request, stage, stage_path, case, index, raw, a
         return None
     command = ue_checks._command(ue_checks._binaries(Path(request["engine_dir"])),
         Path(request["project_dir"]) / "ZhuGuoCity.uproject", {"name": case["name"], "mode": "normal"}, folder / "Unreal.log")
-    command.extend(["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"])
+    # Accept the archived windowed command solely when verifying existing proof.
+    legacy_command = [arg for arg in command if arg not in {"-RenderOffScreen", "-d3d12"}]
+    legacy_command.extend(["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"])
+    command.extend(["-ResX=1280", "-ResY=720"])
     process_path = ue_checks._safe_under(folder, "process.json")
     records = {row["path"]: row for row in case["evidence"]}
-    if (process.get("argv") != command or str(process_path) not in records or
+    if (process.get("argv") not in (command, legacy_command) or str(process_path) not in records or
             ue_checks._object(process_path) != process):
         return None
     inventory = flow._inventory(request)

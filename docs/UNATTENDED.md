@@ -54,6 +54,8 @@ Windows 临时拒绝替换断点、心跳或模型回执文件时（WinError 5/3
 
 Windows 计划任务通过 `codex.windows_sandbox: "unelevated"` 使用普通权限启动本地工具。规划和模型核验使用只读沙箱，编码按该任务的工作区写入授权执行。此选项仅传给项目的 Codex 进程。
 
+开启 `headless: true` 后，Codex 后台调用停用桌面控制和连接应用。Windows 独立检查在专用后台桌面中运行，UE 验证使用 `-unattended -RenderOffScreen`。正常 RHI 验证保留 GPU 渲染和自动化界面操作记录，NullRHI 验证逻辑与状态；需要人工操作的证据标记为待手动验收。显式启动的试玩继续在用户桌面打开。
+
 设置 `coding_provider: "codex"` 可使用已登录 ChatGPT 订阅的 Codex CLI 编码。 `codex.coding_model` 和 `codex.coding_reasoning_effort` 分别控制编码模型和思考档位。调度器为每个任务建立独立的编码会话，同一任务返工时继续该任务的会话。验收的 API 密钥、模型和档位由验收配置控制。
 
 Codex 适配器为规划和验收均显式传入 `--model` 与 `-c model_reasoning_effort="high"`。dsh 将档位写入最后叠加的 `agent-default-model.config.reasoningEffort`，并显式覆盖 `llm-deepseek-account.config.thinking: enabled`，避免继承关闭思考的设置；与已有传输重试配置合并。修改后应安全停止并恢复后台，让新进程读取设置。这里的模型设置不会改变已有任务、验收 HEAD、工作日历或 M2 集中推送策略。

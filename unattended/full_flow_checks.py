@@ -238,7 +238,7 @@ def _execute(argv, cwd, output, timeout):
         # only verified local objects below the source Git directory are used.
         environment["GIT_LFS_SKIP_SMUDGE"] = "1"
     result = run_process(argv, cwd=cwd, output_dir=output, timeout_seconds=timeout,
-                         max_output_bytes=OUTPUT_LIMIT, environment=environment)
+                         max_output_bytes=OUTPUT_LIMIT, environment=environment, private_desktop=True)
     value = {"argv": argv, "cwd": str(cwd), "timeout_seconds": timeout, "exit_code": result.exit_code,
              "timed_out": result.timed_out, "output_limit_exceeded": result.output_limit_exceeded,
              "stdout_path": str(result.stdout_path), "stderr_path": str(result.stderr_path),
@@ -361,7 +361,7 @@ def _automation_command(request, stage, log):
     if stage == "regression":
         command[2] = "-ExecCmds=Automation RunTests " + REGRESSION_SELECTOR
     if stage == "visual":
-        command.extend(["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"])
+        command.extend(["-ResX=1280", "-ResY=720"])
     return command
 
 
@@ -414,7 +414,7 @@ def run_visual_case(request, name, folder, timeout):
     project = Path(request["project_dir"])
     argv = ue_checks._command(ue_checks._binaries(Path(request["engine_dir"])), project / "ZhuGuoCity.uproject",
                              {"name": name, "mode": "normal"}, log)
-    argv.extend(["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"])
+    argv.extend(["-ResX=1280", "-ResY=720"])
     result = {"name": name, "mode": "normal", "kind": "screenshots" if name in inventory["visual"] else "logic_or_widget_evidence",
               "status": "FAIL", "passed": False, "started_at": _now(), "evidence": [], "images": []}
     try:

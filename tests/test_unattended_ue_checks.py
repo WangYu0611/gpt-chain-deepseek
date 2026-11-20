@@ -307,6 +307,9 @@ class BridgeTests(unittest.TestCase):
         for index, (argv, kwargs) in enumerate(self.runner.calls):
             self.assertEqual(Path(argv[0]).name, "UnrealEditor-Cmd.exe" if index == 0 else "UnrealEditor.exe")
             self.assertEqual("-nullrhi" in argv, index == 0)
+            self.assertEqual("-d3d12" in argv, index == 1)
+            self.assertIn("-RenderOffScreen", argv)
+            self.assertNotIn("-windowed", argv)
             self.assertEqual(kwargs["timeout_seconds"], TEST_TIMEOUT_SECONDS)
             self.assertEqual(kwargs["max_output_bytes"], MAX_OUTPUT_BYTES)
             self.assertEqual(kwargs["cwd"], self.work)

@@ -16,7 +16,8 @@ from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import full_flow_checks, gitops, ue_checks
 from .config import codex_role_settings, load_config
 from .network import proxy_environment
-from .providers import AgentProviders, _codex_command, _codex_windows_sandbox_args, _strict_json, parse_codex_events
+from .providers import (AgentProviders, _codex_command, _codex_headless_args, _codex_windows_sandbox_args,
+                        _strict_json, parse_codex_events)
 from .secrets import secret_values
 from .storage import lock, read_json, write_json, write_text
 
@@ -137,7 +138,8 @@ def _native_turn(config, source, output, prompt, model, effort):
         if os.environ.get(name):
             environment[name] = os.environ[name]
     AgentProviders._check_codex_subscription(command, source, environment, time.monotonic() + 15)
-    argv = [*command, "--no-daemon", "-a", "never", "exec", "--ignore-user-config", "--sandbox", "read-only",
+    argv = [*command, "--no-daemon", "-a", "never", "exec",
+            *(_codex_headless_args(config) or ["--ignore-user-config"]), "--sandbox", "read-only",
             "--json", "--color", "never", "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
             "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"']
     argv.extend(_codex_windows_sandbox_args(settings, default="elevated"))

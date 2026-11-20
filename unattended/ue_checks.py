@@ -504,11 +504,13 @@ def _command(binaries: Path, project: Path, test: dict, log: Path, *, milestone_
     if batch_names is not None:
         selector = "+".join(_test_selector(name) for name in batch_names)
     argv = [str(binaries / executable), str(project),
-            "-ExecCmds=Automation RunTests " + selector, "-unattended", "-nop4", "-nosplash",
+            "-ExecCmds=Automation RunTests " + selector, "-unattended", "-RenderOffScreen", "-nop4", "-nosplash",
             "-NoSound", "-DisablePlugins=Fab", "-stdout", "-FullStdOutLogOutput",
             "-TestExit=Automation Test Queue Empty", "-abslog=" + str(log)]
     if test["mode"] == "nullrhi":
         argv.append("-nullrhi")
+    else:
+        argv.append("-d3d12")
     return argv
 
 

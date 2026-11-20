@@ -217,12 +217,15 @@ class RetestTests(unittest.TestCase):
                 self.invoke()
         self.assertEqual(self.calls, [])
 
-    def forced_rhi_fixture(self, *, suffix="", failure=False, missing=False, timed_out=False):
+    def forced_rhi_fixture(self, *, suffix="", failure=False, missing=False, timed_out=False, legacy=False):
         self.first_pass([], [])
         folder = self.run_dir / "checks/visual/attempt-1/case-001"
         command = ue_checks._command(ue_checks._binaries(Path(self.request["engine_dir"])),
             self.project / "ZhuGuoCity.uproject", {"name": V, "mode": "normal"}, folder / "Unreal.log")
-        command.extend(["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"])
+        if legacy:
+            command = [arg for arg in command if arg not in {"-RenderOffScreen", "-d3d12"}]
+            command.extend(["-d3d12", "-windowed"])
+        command.extend(["-ResX=1280", "-ResY=720"])
         text = raw("^" + V + "$", [V], [V] if failure else []) + "LogRHI: Using Forced RHI: D3D12\n" + suffix
         process, evidence = self.logs(folder, command, text, timed_out=timed_out)
         image_path = folder / "images/01.png"
@@ -257,6 +260,13 @@ class RetestTests(unittest.TestCase):
         self.assertEqual(flow._sha(derived), correction["derived_receipt"]["sha256"])
         self.assertEqual(self.invoke()["reconciled_tool_false_failure"], result["reconciled_tool_false_failure"])
         self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+
+    def test_archived_windowed_proof_still_reconciles_without_launching_a_window(self):
+        self.forced_rhi_fixture(legacy=True)
+        result = self.invoke()
+        self.assertTrue(result["passed"])
+        self.assertEqual(len(result["reconciled_tool_false_failure"]), 1)
+        self.assertEqual(self.calls, [])
 
     def test_forced_rhi_never_reconciles_real_failure_missing_image_timeout_or_skip(self):
         variants = ({"failure": True}, {"missing": True}, {"timed_out": True}, {"suffix": "skipped: graphics scenario\n"},

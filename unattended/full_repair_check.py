@@ -165,7 +165,7 @@ def _argv(stage, engine, workspace, folder, name=None):
     argv = ue_checks._command(ue_checks._binaries(engine), project,
              {"name": name or PACKAGE, "mode": mode}, folder / "Unreal.log", milestone_regression=stage == "regression")
     if mode == "normal":
-        argv += ["-d3d12", "-windowed", "-ResX=1280", "-ResY=720"]
+        argv += ["-ResX=1280", "-ResY=720"]
     return argv
 
 

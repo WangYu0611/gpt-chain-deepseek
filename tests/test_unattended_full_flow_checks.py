@@ -113,9 +113,12 @@ class FullFlowChecksTests(unittest.TestCase):
         regression = flow._automation_command(self.request, "regression", self.run / "all.log")
         self.assertIn("-ExecCmds=Automation RunTests ^ZhuGuoCity.M", regression)
         self.assertIn("-nullrhi", regression)
+        self.assertIn("-RenderOffScreen", regression)
         visual = flow._automation_command(self.request, "visual", self.run / "visual.log")
         self.assertNotIn("-nullrhi", visual)
         self.assertIn("-d3d12", visual)
+        self.assertIn("-RenderOffScreen", visual)
+        self.assertNotIn("-windowed", visual)
         for name in flow.VISUAL_TESTS:
             self.assertIn(name, visual[2])
         self.assertEqual(flow.BUDGETS, {"prepare": 300, "build": 1800, "regression": 10800, "visual": 1800, "package": 3600})
@@ -130,6 +133,11 @@ class FullFlowChecksTests(unittest.TestCase):
             self.output = automation(selector, [name], normal=True)
             self.assertTrue(flow.run_visual_case(self.request, name, self.run / "second", 600)["passed"])
         self.assertEqual(self.native_calls[0][1]["max_output_bytes"], 128 * 1024 * 1024)
+        for argv, launch in self.native_calls:
+            self.assertIn("-RenderOffScreen", argv)
+            self.assertIn("-d3d12", argv)
+            self.assertNotIn("-windowed", argv)
+            self.assertTrue(launch["private_desktop"])
 
     def test_stage_cache_is_bound_to_raw_evidence_and_never_reexecutes(self):
         self.receipt("prepare")

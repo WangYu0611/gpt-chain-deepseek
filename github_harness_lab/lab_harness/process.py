@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Callable, Mapping, Sequence
@@ -187,7 +188,8 @@ def safe_environment(source: Mapping[str, str] | None = None, *, extra: Mapping[
 
 def run_process(argv: Sequence[str], *, cwd: Path, output_dir: Path, timeout_seconds: float,
                 environment: Mapping[str, str], stdin: bytes = b"", max_output_bytes: int = 16 * 1024 * 1024,
-                secrets: Sequence[str] = (), stdout_record_filter: Callable[[bytes], bytes] | None = None) -> ProcessResult:
+                secrets: Sequence[str] = (), stdout_record_filter: Callable[[bytes], bytes] | None = None,
+                private_desktop: bool = False) -> ProcessResult:
     """Never invokes a shell. The command and task must come from trusted code/config."""
     if not argv or any(not isinstance(x, str) or "\0" in x for x in argv):
         raise ValueError("argv must contain non-NUL strings")
@@ -195,6 +197,11 @@ def run_process(argv: Sequence[str], *, cwd: Path, output_dir: Path, timeout_sec
         raise ValueError("Use a native executable or node.exe plus a JS entrypoint, not a cmd/bat shim")
     if not 0 < timeout_seconds < float("inf") or max_output_bytes < 1024:
         raise ValueError("A positive timeout and bounded output are required")
+    command = list(argv)
+    if os.name == "nt" and private_desktop:
+        # Assign the hidden launcher to the Job before it can start the real process.
+        launcher = Path(__file__).resolve().with_name("_windows_desktop.py")
+        command = [sys.executable, str(launcher), *command]
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = output_dir / "stdout.log", output_dir / "stderr.log"
@@ -304,7 +311,7 @@ def run_process(argv: Sequence[str], *, cwd: Path, output_dir: Path, timeout_sec
                 options = {"creationflags": subprocess.CREATE_NO_WINDOW | CREATE_SUSPENDED}
             else:
                 options = {"start_new_session": True}
-            process = subprocess.Popen(list(argv), cwd=str(cwd), env=dict(environment), stdin=subprocess.PIPE,
+            process = subprocess.Popen(command, cwd=str(cwd), env=dict(environment), stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, **options)
             if os.name == "nt":
                 try:
