@@ -1,5 +1,8 @@
 {
   "version": 1,
+  "codex_only": true,
+  "planning_provider": "codex",
+  "coding_provider": "codex",
   "project_path": "C:/Projects/REPLACE_WITH_PROJECT",
   "goal": "填写项目具体开发目标、边界及完成条件。建议使用 init --goal-file 从真实需求生成配置。",
   "runtime_dir": ".unattended/example-project",
@@ -34,19 +37,16 @@
   ],
   "codex": {
     "command": ["codex.exe"],
-    "model": "gpt-6-astra",
-    "reasoning_effort": "high",
+    "model": "gpt-6.2-astra",
+    "reasoning_effort": "ultra",
     "coding_model": "gpt-6.2-sol",
-    "coding_reasoning_effort": "high",
+    "coding_reasoning_effort": "ultra",
+    "effort_change_at": "2026-11-22T00:00:00+08:00",
+    "effort_after_change": "high",
+    "tiered_planning": true,
+    "auth_mode": "chatgpt",
+    "review_transport": "codex",
+    "review_transport_after_effort_change": "responses_api",
     "sandbox": "read-only"
-  },
-  "dsh": {
-    "desktop_install": "C:/Users/YOUR_USER/AppData/Local/Programs/DeepSeek Harness",
-    "home": "C:/Users/YOUR_USER/.dsh",
-    "patches": ["dsh-account.patch.yml"],
-    "verified_version": "0.2.1-rc.3",
-    "model": "deepseek-flash",
-    "reasoning_effort": "max",
-    "permission_mode": "workspace-write"
   }
 }

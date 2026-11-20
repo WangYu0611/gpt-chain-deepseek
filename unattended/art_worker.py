@@ -24,8 +24,8 @@ from .storage import lock, read_json, write_json
 
 class ArtWorker(Engine):
     def __init__(self, config, providers=None, *, now=None):
-        if not config.get("art_pipeline") or config.get("coding_provider") != "claude":
-            raise ValueError("美术 worker 需要独立 Claude 配置和 art_pipeline。")
+        if not config.get("art_pipeline") or config.get("coding_provider") not in {"codex", "claude"}:
+            raise ValueError("美术 worker 需要独立编码配置和 art_pipeline。")
         if config.get("push") or config.get("publication") or config.get("art_worker"):
             raise ValueError("美术 worker 不允许发布游戏分支、里程碑策略或递归 worker 路由。")
         super().__init__(config, providers, now=now)
@@ -36,6 +36,8 @@ class ArtWorker(Engine):
         if not route or not route.get("config_file"):
             raise ValueError("主面板尚未配置独立 art_worker.config_file。")
         config = load_config(Path(route["config_file"]))
+        if main_config.get("codex_only") is True and config.get("codex_only") is not True:
+            raise ValueError("当前项目需要 Codex 美术执行器。")
         main_roots = [Path(main_config[key]).resolve() for key in ("project_path", "runtime_dir")]
         worker_roots = [Path(config[key]).resolve() for key in ("project_path", "runtime_dir")]
         if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for a in main_roots for b in worker_roots):

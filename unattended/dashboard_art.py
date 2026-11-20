@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlencode
 
-from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_role_settings, load_config
 
 MAX_PREVIEW_BYTES = 16 * 1024 * 1024
 # Asset manifests enumerate thousands of versioned meshes and textures. Keep
@@ -27,9 +27,11 @@ def worker_config(main_config):
     if not isinstance(route, dict) or set(route) != {"config_file"}:
         raise ValueError("尚未配置独立美术执行器。")
     config = load_config(Path(route["config_file"]))
-    if (not config.get("art_pipeline") or config.get("coding_provider") != "claude" or
+    if (main_config.get("codex_only") is True and config.get("codex_only") is not True):
+        raise ValueError("当前项目需要 Codex 美术执行器。")
+    if (not config.get("art_pipeline") or config.get("coding_provider") not in {"codex", "claude"} or
             config.get("push") or config.get("publication") or config.get("art_worker")):
-        raise ValueError("美术执行器必须使用独立 Claude 配置，不能直接发布功能分支。")
+        raise ValueError("美术执行器必须使用独立配置，不能直接发布功能分支。")
     main_roots = [Path(main_config[key]).resolve() for key in ("project_path", "runtime_dir")]
     art_roots = [Path(config[key]).resolve() for key in ("project_path", "runtime_dir")]
     if any(a == b or a.is_relative_to(b) or b.is_relative_to(a) for a in main_roots for b in art_roots):
@@ -413,9 +415,9 @@ def _reload_maintenance(config, state, *, lane="art"):
                               session == task.get("session_id") and task.get("session_owner_task_id", task.get("id")) == task.get("id"))
                 except (OSError, ValueError, TypeError, AttributeError):
                     pass
-            if lane == "development":
+            if lane == "development" or operation.get("coding_provider") == "codex":
                 active = _native_code_active(runtime, task, operation, directory)
-    summary = ("Claude 完成当前调用后自动切换调度；暂停标记只限制下一步，当前调用会自然结束。" if active else
+    summary = ("当前调用会自然结束，随后自动切换调度。" if active else
                "调度维护正在等待安全边界，随后自动切换。" if stage == "waiting_boundary" else
                "正在安全切换" + ("美术" if lane == "art" else "功能开发") + "调度，等待后台接续。")
     return {"status": stage, "current_call_active": active, "label": "当前调用后自动切换调度" if active else "等待调度安全切换", "summary": summary}
@@ -446,12 +448,24 @@ def collect_art_snapshot(main_config, now):
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             result["diagnosis_response_error"] = _clean(str(error), 400)
         phase = state.get("phase", "PLAN")
-        retry = _provider_retry(state, "Claude Code", "Claude Code" if config.get("planning_provider") == "claude" else "Codex")
+        coder = config.get("coding_provider")
+        coder_name = "Codex" if coder == "codex" else "Claude Code"
+        planner = "Claude Code" if config.get("planning_provider") == "claude" else "Codex"
+        model, effort = (codex_role_settings(config, "plan" if phase == "ART_DIAGNOSE" else "code", now=now)
+                         if coder == "codex" else (claude_execution_model(config), ART_CODING_REASONING_EFFORT))
+        task = state.get("task") or {}
+        operation = state.get("operation") or {}
+        if phase == "ART_DIAGNOSE":
+            model = operation.get("diagnosis_model", model)
+            effort = operation.get("diagnosis_reasoning_effort", effort)
+        elif phase == "CODE":
+            model = operation.get("coding_model", task.get("coding_model", model))
+            effort = operation.get("coding_reasoning_effort", task.get("coding_reasoning_effort", effort))
+        retry = _provider_retry(state, coder_name, planner)
         result["provider_retry"] = retry
         result["production_progress"] = _production_progress(config, state, now)
         result["blocking_detail"], result["blocking_summary"] = _blocking_text(state)
-        result.update(phase=phase, model=_clean((state.get("task") or {}).get("coding_model") or claude_execution_model(config), 120),
-                      effort=_clean((state.get("task") or {}).get("coding_reasoning_effort") or ART_CODING_REASONING_EFFORT, 40),
+        result.update(phase=phase, coding_provider=coder, model=_clean(model, 120), effort=_clean(effort, 40),
                       worker=_worker(runtime, Path(config["config_path"]), now),
                       task_id=_clean((state.get("task") or {}).get("id"), 100),
                       last_error="" if retry else _clean(state.get("last_error"), 400),
@@ -500,8 +514,8 @@ def collect_art_snapshot(main_config, now):
         statuses = {row["status"] for row in result["requests"]}
         status = "paused" if result["paused"] else "blocked" if phase == "BLOCKED" else phase.lower() if phase != "PLAN" else (
             "awaiting_approval" if "awaiting_approval" in statuses else "queued" if "queued" in statuses else "idle")
-        result.update(status=status, label={"paused": "已暂停", "blocked": "需要处理", "code": "Claude 制作中",
-            "art_diagnose": "Claude 自主诊断与调整", "art_check": "独立技术检查", "art_review": "技术审核中", "awaiting_approval": "等待视觉验收",
+        result.update(status=status, label={"paused": "已暂停", "blocked": "需要处理", "code": f"{coder_name} 制作中",
+            "art_diagnose": f"{planner} 自主诊断与调整", "art_check": "独立技术检查", "art_review": "技术审核中", "awaiting_approval": "等待视觉验收",
             "queued": "已排队", "idle": "待命"}[status])
         if result["maintenance"] and result["paused"]:
             result["label"] = result["maintenance"]["label"]

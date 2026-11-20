@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_coding_settings, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_coding_settings, codex_role_settings, load_config
 from .calendar import BEIJING
 from .dashboard_state import _CODING_NAMES, _clean, _confined, _iso, _object
 
@@ -165,12 +165,14 @@ def _art_operation(cfg, state, owned):
         directory = _confined(runtime / "runs", Path(operation["output_dir"]))
         if operation["kind"] == "review":
             _, directory = _codex_route(runtime, directory, "review")
-        elif operation["kind"] in {"code", "art_diagnose"}:
+        elif operation["kind"] in {"code", "art_diagnose"} and cfg.get("coding_provider") != "codex":
             directory = _claude_directory(runtime, directory, operation["kind"])
         receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=16384)
         finished = receipt.get("kind") == operation["kind"] and (
             type(receipt.get("exit_code")) is int or receipt.get("launch_or_capture_failed") is True)
         if operation["kind"] == "art_diagnose":
+            if operation.get("diagnosis_provider") == "codex":
+                return None, None, finished
             model, effort = _diagnosis_model(runtime, directory, operation, task, receipt)
             return model, effort, finished
         if operation["kind"] == "art_check":
@@ -179,6 +181,10 @@ def _art_operation(cfg, state, owned):
                         and bool(operation.get("head_sha")) and check.get("head_sha") == operation["head_sha"])
         if operation["kind"] != "code":
             return None, None, finished
+        if operation.get("coding_provider") == "codex":
+            # The controller still renders and verifies preview evidence
+            # after the native editing turn has exited.
+            return None, None, False
         session, _ = _task_session(runtime, task, operation, "CODE", "claude")
         model, effort = _operation_model(runtime, operation, directory, session)
         if model and receipt.get("kind") == "code" and receipt.get("session_id") == session:
@@ -217,6 +223,9 @@ def _art(main, snapshot, now):
     nodes = [_node("art", key, title, actor=actor, state="idle" if art.get("configured") else "disabled")
              for key, title, actor in zip(ids, ART_TITLES, ART_ACTORS)]
     rows = {row["id"]: row for row in nodes}
+    using_codex = art.get("coding_provider") == "codex"
+    if using_codex or main.get("codex_only"):
+        rows["queue"]["actor"] = "Codex"
     if not art.get("configured"):
         return _lane("art", "美术制作", None, nodes, edges, "尚未配置独立美术执行器")
     cfg, state, owned, progress = {}, {}, False, None
@@ -268,23 +277,28 @@ def _art(main, snapshot, now):
     active = rows[current]
     active["current"] = True
     model, effort, finished = _art_operation(cfg, state, owned) if cfg else (None, None, False)
-    rows["queue"].update(model=model or claude_execution_model(cfg), effort=effort if model else ART_CODING_REASONING_EFFORT,
+    configured_model, configured_effort = ((art.get("model"), art.get("effort")) if using_codex else
+                                           (claude_execution_model(cfg), ART_CODING_REASONING_EFFORT))
+    review_model, review_effort = codex_role_settings(cfg, "review", now=now)
+    rows["queue"].update(model=model or configured_model, effort=effort if model else configured_effort,
                          model_source="recorded" if model else "configured")
-    rows["review"].update(model=(cfg.get("codex") or {}).get("model"), effort=(cfg.get("codex") or {}).get("reasoning_effort"),
-                          model_source="configured" if (cfg.get("codex") or {}).get("model") else None)
+    rows["review"].update(model=review_model, effort=review_effort,
+                          model_source="configured" if review_model else None)
     summary = art.get("label") or "等待任务"
     if current == "queue" and phase == "ART_DIAGNOSE":
-        active.update(title="Claude 自主诊断与调整", actor="Claude Code")
+        actor = "Codex" if using_codex else "Claude Code"
+        active.update(title=f"{actor} 自主诊断与调整", actor=actor)
         summary = ("本次诊断已结束，等待控制器按既有授权接续制作。" if finished else
+                   "Codex 正在独立复核美术证据并制定调整计划。" if using_codex else
                    "Claude 在原制作会话的只读分支复盘证据并制定调整计划，返回后按既有授权接续制作。")
         summary += "诊断计划不代表制作完成或视觉验收通过。"
     elif current == "queue" and phase == "CODE":
-        summary = "Claude 编写制作脚本、读取参考或准备固定制作入口；尚无本次工具阶段回执。"
-        active.update(model=model or claude_execution_model(cfg), effort=effort if model else ART_CODING_REASONING_EFFORT,
+        summary = ("Codex 编辑美术配方和脚本，随后由控制器生成预览。" if using_codex else
+                   "Claude 编写制作脚本、读取参考或准备固定制作入口；尚无本次工具阶段回执。")
+        active.update(model=model or configured_model, effort=effort if model else configured_effort,
                       model_source="recorded" if model else "configured")
     elif current == "review":
-        active.update(model=(cfg.get("codex") or {}).get("model"), effort=(cfg.get("codex") or {}).get("reasoning_effort"),
-                      model_source="configured" if (cfg.get("codex") or {}).get("model") else None)
+        active.update(model=review_model, effort=review_effort, model_source="configured" if review_model else None)
     if progress:
         summary = progress["label"] + (" · " + progress["asset"] if progress.get("asset") else "") + "；更新于 " + (_local_time(progress["updated_at"]) or "时间待核实")
     active["state"] = "running" if owned and not finished and current not in completed else "completed" if current in completed else "ready"

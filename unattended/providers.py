@@ -27,8 +27,9 @@ from github_harness_lab.lab_harness.dsh_legacy import VERIFIED_VERSION, parse_le
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import ue_checks
 from .config import (ART_CODING_REASONING_EFFORT, CLAUDE_PINNED_MODELS, claude_coding_settings,
-                     codex_coding_settings, validate_art_pipeline_settings, validate_model_settings)
-from .secrets import read_secret, validate_api_base_url
+                     codex_coding_settings, codex_review_transport, codex_role_settings, planned_core_tests,
+                     validate_art_pipeline_settings, validate_model_settings)
+from .secrets import read_secret, read_secret_list, validate_api_base_url
 from .network import proxy_environment
 from .storage import atomic_replace, write_text
 
@@ -1782,17 +1783,27 @@ def _managed_art_task(config: dict, cwd: Path, out: Path, kind: str) -> tuple[di
             raise ValueError("linked art runtime")
         for relative in ("workspace", "runs", "state.json", Path("runs") / out.name):
             ue_checks._safe_under(runtime, relative)
-        if task.get("coding_model") not in CLAUDE_PINNED_MODELS or task.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT:
-            raise ValueError("art tasks require an authorized pinned Claude model and high effort")
-        if task.get("art_request", {}).get("model", task["coding_model"]) != task["coding_model"]:
-            raise ValueError("art task model differs from its queued request")
-        if kind == "code" and (operation.get("coding_model") != task["coding_model"] or
-                               operation.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT):
-            raise ValueError("art operation model differs from its task")
-        if kind == "art_diagnose" and (operation.get("diagnosis_provider") != "claude" or
-                operation.get("diagnosis_model") != task["coding_model"] or
-                operation.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT):
-            raise ValueError("art diagnosis model differs from its task")
+        if config.get("coding_provider") == "codex":
+            if task.get("coding_provider") != "codex":
+                raise ValueError("art task has not migrated to Codex")
+            if kind in {"code", "art_diagnose"}:
+                source = "coding" if kind == "code" else "diagnosis"
+                if operation.get(source + "_provider") != "codex":
+                    raise ValueError("art operation provider differs from its task")
+                validate_model_settings({"model": operation.get(source + "_model"),
+                                         "reasoning_effort": operation.get(source + "_reasoning_effort")}, "codex")
+        else:
+            if task.get("coding_model") not in CLAUDE_PINNED_MODELS or task.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT:
+                raise ValueError("art tasks require an authorized pinned Claude model and high effort")
+            if task.get("art_request", {}).get("model", task["coding_model"]) != task["coding_model"]:
+                raise ValueError("art task model differs from its queued request")
+            if kind == "code" and (operation.get("coding_model") != task["coding_model"] or
+                                   operation.get("coding_reasoning_effort") != ART_CODING_REASONING_EFFORT):
+                raise ValueError("art operation model differs from its task")
+            if kind == "art_diagnose" and (operation.get("diagnosis_provider") != "claude" or
+                    operation.get("diagnosis_model") != task["coding_model"] or
+                    operation.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT):
+                raise ValueError("art diagnosis model differs from its task")
         return task, settings
     except (KeyError, TypeError, ValueError, OSError, AttributeError) as error:
         raise ProviderError("Art provider requires a valid managed task: " + str(error)) from error
@@ -1842,14 +1853,36 @@ def _codex_art_review_directory(config: dict, cwd: Path, out: Path) -> Path | No
     return _art_public_evidence_directory(config, cwd, out, "review")
 
 
-def _claude_art_diagnosis_context(config: dict, cwd: Path, out: Path, source: str) -> tuple[list[Path], dict, dict]:
+def _codex_art_coding_profile(config: dict, cwd: Path, out: Path) -> list[str]:
+    from .art_pipeline import blender_job_file_path, recipe_file_path
+    public = _art_public_evidence_directory(config, cwd, out, "code")
+    if public is None:
+        raise ProviderError("Codex art coding requires a managed art task")
+    batch = _json_file(Path(config["art_pipeline"]["config_file"]))
+    paths = [recipe_file_path(batch, workspace=cwd), blender_job_file_path(batch, workspace=cwd)]
+    if any(path is not None and (path.parent == cwd or path.is_relative_to(cwd / ".git")) for path in paths):
+        raise ProviderError("Codex art recipe and Blender script must have dedicated subdirectories")
+    writable = {path.parent.as_posix(): "write" for path in paths if path is not None}
+    # The controller checks the exact changed files and owns Git metadata and
+    # the paid preview. The coding sandbox can only edit recipe directories.
+    name = "art-coding-" + hashlib.sha256(str(out).encode()).hexdigest()[:16]
+    filesystem = {":root": "read", ":workspace_roots": "read", ":tmpdir": "write",
+                  public.as_posix(): "read", **writable}
+    inline = "{" + ",".join(json.dumps(key) + "=" + json.dumps(value) for key, value in filesystem.items()) + "}"
+    return ["-c", "default_permissions=" + json.dumps(name), "-c", "permissions." + name + ".filesystem=" + inline,
+            "-c", "permissions." + name + ".network.enabled=false"]
+
+
+def _art_diagnosis_context(config: dict, cwd: Path, out: Path, source: str | None) -> tuple[list[Path], dict, dict]:
     """Grant only this task's public evidence, never the whole runtime or credentials."""
     context = _managed_art_task(config, cwd, out, "art_diagnose")
     if context is None:
         raise ProviderError("Art diagnosis requires a managed art task")
     task, settings = context
     try:
-        if (not isinstance(source, str) or not _CLAUDE_SESSION.fullmatch(source) or
+        source_valid = (source is None and config.get("coding_provider") == "codex" or
+                        isinstance(source, str) and _CLAUDE_SESSION.fullmatch(source))
+        if (not source_valid or
                 task.get("session_id") != source or task.get("session_owner_task_id", task["id"]) != task["id"]):
             raise ValueError("diagnostic source differs from the production session")
         runtime = Path(config["runtime_dir"]).absolute()
@@ -1880,17 +1913,18 @@ def _claude_art_diagnosis_context(config: dict, cwd: Path, out: Path, source: st
                    "output_dir": str(Path(out).resolve()), "head_sha": head}
         return directories, binding, task
     except (KeyError, TypeError, ValueError, OSError, AttributeError) as error:
-        raise ProviderError("Claude art diagnosis requires task-scoped read-only evidence: " + str(error)) from error
+        raise ProviderError("Art diagnosis requires task-scoped read-only evidence: " + str(error)) from error
 
 
-def _codex_read_only_profile(directory: Path, out: Path) -> list[str]:
+def _codex_read_only_profile(directory: Path, out: Path, *, extra_directories=()) -> list[str]:
     # --add-dir grants writable roots; use a read-only permission profile instead.
     # Override only this invocation, with a unique name to avoid inherited entries.
     name = "art-review-" + hashlib.sha256(str(out).encode()).hexdigest()[:16]
     # Legacy elevated Windows sandbox requires effective :root read. Keep the
     # existing Codex read-only baseline; this is not a read-isolation boundary.
     # The validated public directory itself cannot contain private state/keys.
-    filesystem = {":root": "read", ":workspace_roots": "read", directory.as_posix(): "read"}
+    filesystem = {":root": "read", ":workspace_roots": "read",
+                  **{path.as_posix(): "read" for path in (directory, *extra_directories)}}
     inline = "{" + ",".join(json.dumps(key) + "=" + json.dumps(value) for key, value in filesystem.items()) + "}"
     return ["-c", "default_permissions=" + json.dumps(name),
             "-c", "permissions." + name + ".filesystem=" + inline,
@@ -2159,6 +2193,12 @@ def _codex_api_key(config_path: str | Path | None = None, *,
     return None
 
 
+def _codex_api_keys(config_path=None, *, secrets_file=None) -> list[str]:
+    primary = _codex_api_key(config_path, secrets_file=secrets_file)
+    backups = read_secret_list("CODEX_API_KEY_BACKUPS", config_path=config_path, secrets_file=secrets_file)
+    return list(dict.fromkeys(key for key in (primary, *backups) if key))
+
+
 class AgentProviders:
     def __init__(self, config: dict):
         self.config = config
@@ -2171,13 +2211,13 @@ class AgentProviders:
         if self.config.get("planning_provider", "codex") == "claude":
             return self._claude_plan(prompt, cwd, out, timeout, model=model,
                                      reasoning_effort=reasoning_effort, tiered=tiered)
-        if model is not None or reasoning_effort is not None or tiered is True:
-            raise ProviderError("Planner model overrides require the Claude planning provider")
+        if model is not None or reasoning_effort is not None or tiered is not None:
+            return self._codex("plan", prompt, cwd, out, timeout,
+                               model=model, reasoning_effort=reasoning_effort, tiered=tiered is True)
         return self._codex("plan", prompt, cwd, out, timeout)
 
     def review(self, prompt: str, cwd: Path, out: Path, timeout: float) -> dict:
-        settings = self.config.get("codex", {})
-        transport = settings.get("review_transport", "codex")
+        transport = codex_review_transport(self.config)
         if transport == "codex":
             return self._codex("review", prompt, cwd, out, timeout)
         if transport != "responses_api":
@@ -2185,7 +2225,7 @@ class AgentProviders:
         return self._responses_review(prompt, cwd, out, timeout)
 
     def resume_review(self, prompt: str, cwd: Path, out: Path, timeout: float, *, previous_out: Path) -> dict:
-        if self.config.get("codex", {}).get("review_transport", "codex") != "responses_api":
+        if codex_review_transport(self.config) != "responses_api":
             raise ProviderError("Review continuation requires the Responses API transport")
         if Path(previous_out).resolve() == Path(out).resolve():
             raise ProviderError("Review continuation requires a fresh invocation directory")
@@ -2209,8 +2249,13 @@ class AgentProviders:
             options["resume_from"] = resume_from
         return api_review.review(self.config, prompt, cwd, out, timeout, **options)
 
-    def _codex(self, kind: str, prompt: str, cwd: Path, out: Path, timeout: float) -> dict:
-        settings = self.config.get("codex", {})
+    def _codex(self, kind: str, prompt: str, cwd: Path, out: Path, timeout: float, *,
+               model=None, reasoning_effort=None, tiered=False) -> dict:
+        settings = dict(self.config.get("codex", {}))
+        default_model, default_effort = codex_role_settings(self.config, kind)
+        settings.update({key: value for key, value in (("model", model or default_model),
+                         ("reasoning_effort", reasoning_effort or default_effort)) if value is not None})
+        settings["tiered"] = tiered
         try:
             validate_model_settings(settings, "codex")
         except ValueError as error:
@@ -2229,7 +2274,7 @@ class AgentProviders:
                        "只审阅公共产物与主项目，不要读取密钥、私有账本或无关目录。"
                        "不得修改产物、配置或主项目。此次验收不能代替用户视觉批准。\n")
         deadline = time.monotonic() + timeout
-        auth_mode = settings.get("auth_mode")
+        auth_mode = settings.get(kind + "_auth_mode", settings.get("auth_mode"))
         fallback = auth_mode == "api_key" and settings.get("subscription_fallback") is True
         if fallback and any((out / name).exists() for name in (
                 "stdout.log", "stderr.log", "process.json", "result.json", "final.json", _CODEX_SUBSCRIPTION_DIR)):
@@ -2254,9 +2299,11 @@ class AgentProviders:
         out.mkdir(parents=True, exist_ok=True)
         schema = REVIEW_SCHEMA
         if kind == "plan":
-            planned = (self.config.get("coding_provider") in {"claude", "codex"} and
-                       self.config.get("claude", {}).get("planned_core_tests") is True)
-            schema = PLAN_WITH_CORE_TESTS_SCHEMA if planned else PLAN_SCHEMA
+            planned = planned_core_tests(self.config)
+            if settings["tiered"]:
+                schema = TIERED_PLAN_WITH_CORE_TESTS_SCHEMA if planned else TIERED_PLAN_SCHEMA
+            else:
+                schema = PLAN_WITH_CORE_TESTS_SCHEMA if planned else PLAN_SCHEMA
         _atomic_json(out / "schema.json", schema)
         permission_args = (_codex_read_only_profile(art_directory, out) if art_directory is not None
                            else ["--sandbox", sandbox])
@@ -2436,7 +2483,10 @@ class AgentProviders:
             if os.environ.get(name):
                 environment[name] = os.environ[name]
         deadline = time.monotonic() + timeout
-        profile, git_roots = _codex_coding_profile(cwd, out, environment)
+        if self.config.get("art_pipeline"):
+            profile, git_roots = _codex_art_coding_profile(self.config, cwd, out), []
+        else:
+            profile, git_roots = _codex_coding_profile(cwd, out, environment)
         try:
             self._check_codex_subscription(command, cwd, environment, deadline)
         except ProviderError as error:
@@ -2470,6 +2520,8 @@ class AgentProviders:
 
     def _claude_invoke(self, kind: str, argv: list[str], prompt: str, cwd: Path, out: Path,
                        timeout: float, environment: dict[str, str], settings: dict, **options) -> None:
+        if self.config.get("codex_only"):
+            raise ProviderError("Claude execution is disabled for this project")
         mode = settings.get("auth_mode", "subscription")
         fallback = mode == "api_key" and settings.get("subscription_fallback") is True
         endpoint = urlsplit(environment.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))
@@ -2603,10 +2655,12 @@ class AgentProviders:
         _atomic_json(out / "result.json", recovered)
         return recovered
 
-    def art_diagnose(self, prompt: str, cwd: Path, out: Path, timeout: float, *, session_id: str) -> dict:
+    def art_diagnose(self, prompt: str, cwd: Path, out: Path, timeout: float, *, session_id: str | None) -> dict:
         """Fork the production conversation for diagnosis without editing it or the workspace."""
+        if self.config.get("coding_provider") == "codex":
+            return self._codex_art_diagnose(prompt, cwd, out, timeout, session_id)
         cwd, out = Path(cwd).absolute(), Path(out).absolute()
-        directories, binding, task = _claude_art_diagnosis_context(self.config, cwd, out, session_id)
+        directories, binding, task = _art_diagnosis_context(self.config, cwd, out, session_id)
         if any((out / name).exists() for name in ("stdout.log", "stderr.log", "process.json", "result.json", "final.json")):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
         settings = dict(self.config.get("claude", {}))
@@ -2643,6 +2697,74 @@ class AgentProviders:
             raise ProviderError("Claude art diagnosis completed without a durable structured result")
         _atomic_json(out / "result.json", recovered)
         return recovered
+
+    def _codex_art_diagnose(self, prompt: str, cwd: Path, out: Path, timeout: float, session_id: str | None) -> dict:
+        cwd, out = Path(cwd).resolve(), Path(out).resolve()
+        directories, binding, _ = _art_diagnosis_context(self.config, cwd, out, session_id)
+        operation = _json_file(Path(self.config["runtime_dir"]) / "state.json")["operation"]
+        model, effort = operation["diagnosis_model"], operation["diagnosis_reasoning_effort"]
+        command = _codex_command(self.config["codex"].get("command"))
+        environment = safe_environment()
+        environment.update(proxy_environment(config_path=self.config.get("config_path"),
+                                               secrets_file=self.config.get("secrets_file"),
+                                               network_file=self.config.get("network_file")))
+        for name in ("CODEX_HOME", "NODE_EXTRA_CA_CERTS"):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        deadline = time.monotonic() + timeout
+        self._check_codex_subscription(command, cwd, environment, deadline)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("Codex diagnosis exhausted its time budget before the request", interrupted=True)
+        prompt += ("\n本轮是独立只读诊断。只查看本任务工作区、公开产物和任务记录，"
+                   "不读取私有账本与密钥，不制作、不提交、不调用付费接口。"
+                   "公开证据：" + directories[1].as_posix() + "。任务记录：" + directories[2].as_posix() + "。"
+                   "诊断 head_sha 必须为 " + binding["head_sha"] + "。")
+        out.mkdir(parents=True, exist_ok=True)
+        _atomic_json(out / "schema.json", ART_DIAGNOSE_SCHEMA)
+        profile = _codex_read_only_profile(directories[1], out, extra_directories=(directories[2],))
+        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile, "--json", "--color", "never",
+                "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
+                "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
+                "--output-schema", str(out / "schema.json"), "-"]
+        self._invoke("art_diagnose", argv, prompt, cwd, out, remaining, environment,
+                     requested_session=session_id, diagnosis_binding=binding, diagnosis_provider="codex",
+                     diagnosis_model=model, diagnosis_reasoning_effort=effort, codex_auth_mode="chatgpt",
+                     review_read_only_dirs=[str(path) for path in directories[1:]])
+        recovered = self.recover("art_diagnose", out)
+        if recovered is None:
+            raise ProviderError("Codex completed art diagnosis without a durable structured result")
+        _atomic_json(out / "result.json", recovered)
+        return recovered
+
+    def _recover_codex_art_diagnosis(self, out, record):
+        _, binding, _ = _art_diagnosis_context(self.config, Path(record["workspace"]), out,
+                                              record.get("requested_session"))
+        operation = _json_file(Path(self.config["runtime_dir"]) / "state.json")["operation"]
+        if (any(record.get(key) != value for key, value in binding.items()) or
+                record.get("codex_auth_mode") != "chatgpt" or
+                record.get("diagnosis_model") != operation["diagnosis_model"] or
+                record.get("diagnosis_reasoning_effort") != operation["diagnosis_reasoning_effort"] or
+                _json_file(out / "schema.json") != ART_DIAGNOSE_SCHEMA):
+            raise ProviderError("Saved Codex art diagnosis differs from its operation")
+        native = parse_codex_events(out / "stdout.log", exit_code=record["exit_code"])
+        thread = native["session_id"]
+        if (not _CLAUDE_SESSION.fullmatch(thread) or record.get("diagnosis_session") != thread or
+                record.get("requested_session") == thread):
+            raise ProviderError("Codex art diagnosis must use a separate native thread")
+        final = None
+        with (out / "stdout.log").open(encoding="utf-8-sig") as source:
+            for line in source:
+                if line.strip():
+                    event = _strict_json(line)
+                    item = event.get("item")
+                    if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+                        final = item.get("text")
+        result = validate_output("art_diagnose", _strict_json(final)) if isinstance(final, str) else None
+        if (result is None or result["head_sha"] != binding["head_sha"] or
+                (out / "result.json").exists() and _json_file(out / "result.json") != result):
+            raise ProviderError("Saved Codex art diagnosis result differs from its native receipt")
+        return result
 
     def _claude_code(self, prompt: str, cwd: Path, out: Path, timeout: float,
                      session_id: str | None) -> dict:
@@ -2749,6 +2871,7 @@ class AgentProviders:
                 coding_model: str | None = None, coding_reasoning_effort: str | None = None,
                 strict_model_selection: bool = False, review_read_only_dirs: list[str] | None = None,
                 diagnosis_binding: dict | None = None,
+                diagnosis_provider: str = "claude",
                 diagnosis_model: str | None = None, diagnosis_reasoning_effort: str | None = None,
                 repair_binding: dict | None = None,
                 followup_binding: dict | None = None,
@@ -2767,9 +2890,10 @@ class AgentProviders:
                                                 "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
                    if environment.get(key)]
         receipt_fields = {"coding_provider": coding_provider} if coding_provider else {}
-        if coding_provider == "codex":
+        if coding_provider == "codex" or kind == "art_diagnose" and diagnosis_provider == "codex":
             from .secrets import secret_values
             secrets.extend(secret_values(config_path=self.config.get("config_path"), secrets_file=self.config.get("secrets_file")))
+        if coding_provider == "codex":
             receipt_fields.update(coding_protocol=coding_protocol, coding_sandbox=coding_sandbox,
                                   coding_writable_git_roots=coding_writable_git_roots, **(coding_context or {}))
         if claude_auth_mode is not None:
@@ -2803,10 +2927,11 @@ class AgentProviders:
         if planning_reasoning_effort is not None:
             receipt_fields["planning_reasoning_effort"] = planning_reasoning_effort
         diagnostic = kind == "art_diagnose"
+        claude_diagnostic = diagnostic and diagnosis_provider == "claude"
         if diagnostic:
             if diagnosis_binding is None:
                 raise ProviderError("Art diagnosis is missing its managed operation binding")
-            receipt_fields.update(diagnosis_provider="claude", diagnosis_model=diagnosis_model,
+            receipt_fields.update(diagnosis_provider=diagnosis_provider, diagnosis_model=diagnosis_model,
                                   diagnosis_reasoning_effort=diagnosis_reasoning_effort, **diagnosis_binding)
         protocol_session = None if diagnostic else requested_session
         claude = _claude_receipt(kind, receipt_fields)
@@ -2858,7 +2983,7 @@ class AgentProviders:
         if fallback_plan:
             selection_model, selection_effort = planning_model, planning_reasoning_effort
         repair_facts = None
-        if diagnostic or fallback_plan or (kind == "code" and coding_provider == "claude" and coding_model is not None):
+        if claude_diagnostic or fallback_plan or (kind == "code" and coding_provider == "claude" and coding_model is not None):
             try:
                 if repair_binding is not None:
                     repair_facts = _claude_repair_native(out, record)
@@ -2881,7 +3006,7 @@ class AgentProviders:
         _atomic_json(out / "process.json", record)
         if "user_followup" in record:
             _atomic_json(out / "ue-mcp-evidence.json", record["user_followup"])
-        if diagnostic:
+        if claude_diagnostic:
             _atomic_json(out / "model-selection.json", {**record["model_selection"], **diagnosis_binding,
                          "requested_session": requested_session, "diagnosis_session": record["diagnosis_session"]})
         elif repair_binding is not None:
@@ -2945,13 +3070,15 @@ class AgentProviders:
             if kind == "art_diagnose":
                 if not (out / "stdout.log").is_file():
                     return None
+                if record.get("diagnosis_provider") == "codex":
+                    return self._recover_codex_art_diagnosis(out, record)
                 if (record.get("diagnosis_provider") != "claude" or
                         record.get("diagnosis_model") not in CLAUDE_PINNED_MODELS or
                         record.get("diagnosis_reasoning_effort") != ART_CODING_REASONING_EFFORT or
                         record.get("strict_model_selection") is not True):
                     raise ProviderError("Saved art diagnosis does not require the pinned Claude model")
-                _, binding, task = _claude_art_diagnosis_context(self.config, Path(record["workspace"]), managed_out,
-                                                                 record.get("requested_session"))
+                _, binding, task = _art_diagnosis_context(self.config, Path(record["workspace"]), managed_out,
+                                                           record.get("requested_session"))
                 if record["diagnosis_model"] != task["coding_model"]:
                     raise ProviderError("Saved art diagnosis model differs from its pinned task")
                 if any(record.get(key) != value for key, value in binding.items()):

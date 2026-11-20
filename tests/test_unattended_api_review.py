@@ -59,7 +59,7 @@ class ApiReviewTests(unittest.TestCase):
         self.addCleanup(patch.stopall)
         self.evidence = FakeEvidence()
         patch.object(api, "ReviewEvidence", return_value=self.evidence).start()
-        patch.object(api, "_codex_api_key", return_value="private-api-credential").start()
+        patch.object(api, "_codex_api_keys", return_value=["private-api-credential"]).start()
         patch.object(api, "read_secret", return_value=None).start()
         patch("unattended.secrets.secret_values", return_value=["private-backup-credential"]).start()
         patch.object(api, "REQUEST_ATTEMPTS", 1).start()
@@ -367,6 +367,17 @@ class ApiReviewTests(unittest.TestCase):
             self.assertEqual(self.invoke([api._RequestFailure(status=429, reason="rate_limited", retry_after=3), *replies]), RESULT)
         sleep.assert_called_once_with(3)
         self.assertEqual(self.requests[0][0], self.requests[1][0])
+
+    def test_quota_rejection_switches_to_backup_without_changing_model_or_request(self):
+        primary, backup = "private-api-credential", "private-backup-credential"
+        with patch.object(api, "_codex_api_keys", return_value=[primary, backup]):
+            self.assertEqual(self.invoke([api._RequestFailure(status=429, code="insufficient_quota"),
+                                          *self.exchange()]), RESULT)
+        self.assertEqual([row[1] for row in self.requests], [primary, backup, backup])
+        self.assertEqual(self.requests[0][0], self.requests[1][0])
+        receipt = json.loads((self.out / "process.json").read_text())
+        self.assertEqual(receipt["request_failures"][0]["credential_slot"], 1)
+        self.assertNotIn(backup, json.dumps(receipt))
 
     def test_truncated_http_diagnostics_record_types_without_raw_partial_body(self):
         with patch.object(api, "build_opener") as build:

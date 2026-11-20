@@ -14,7 +14,8 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .providers import REVIEW_SCHEMA, ProviderError, _atomic_json, _codex_api_key, _strict_json, validate_output
+from .config import codex_role_settings
+from .providers import REVIEW_SCHEMA, ProviderError, _atomic_json, _codex_api_keys, _strict_json, validate_output
 from .review_evidence import ReviewEvidence
 from .network import proxy_handler
 from .secrets import read_secret, validate_api_base_url
@@ -155,9 +156,12 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
         raise ProviderError("API review returned invalid JSON") from None
 
 
-def _request(payload, key, endpoint, proxy, deadline, receipt, out, number):
+def _request(payload, credentials, endpoint, proxy, deadline, receipt, out, number):
     """Retry an unchanged read-only review request before abandoning its transcript."""
-    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+    attempt = 0
+    while True:
+        slot, key = credentials[0]
+        attempt += 1
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             receipt["timed_out"] = True
@@ -165,13 +169,19 @@ def _request(payload, key, endpoint, proxy, deadline, receipt, out, number):
         try:
             return _post(payload, key, endpoint, remaining, proxy=proxy)
         except _RequestFailure as error:
-            row = {"round": number, "attempt": attempt, "request_sha256": _hash(payload),
+            row = {"round": number, "attempt": attempt, "credential_slot": slot, "request_sha256": _hash(payload),
                    "http_status": error.status, "api_error_code": error.code, "retry_reason": error.reason,
                    "transport_exception": error.transport, "at": _now()}
             failures = receipt.setdefault("request_failures", [])
             failures.append(row)
             del failures[:-128]
             _save(out / "process.json", receipt)
+            if len(credentials) > 1 and (
+                    error.code in _PERMANENT_CODES or error.code == "model_not_found" or
+                    error.status in {401, 403} or (error.reason == "rate_limited" and attempt >= REQUEST_ATTEMPTS)):
+                credentials.pop(0)
+                attempt = 0
+                continue
             delay = max(REQUEST_BACKOFF[min(attempt - 1, len(REQUEST_BACKOFF) - 1)], error.retry_after or 0)
             if (not error.reason or error.code in _PERMANENT_CODES or attempt == REQUEST_ATTEMPTS or
                     delay > 30 or time.monotonic() + delay >= deadline):
@@ -363,15 +373,17 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
-    settings = config.get("codex", {})
-    model = settings.get("model")
+    settings = dict(config.get("codex", {}))
+    model, effort = codex_role_settings(config, "review")
+    settings.update(model=model, reasoning_effort=effort)
     if not isinstance(model, str) or not model.strip():
         raise ProviderError("API review requires an explicit model")
-    key = _codex_api_key(config.get("config_path"), secrets_file=config.get("secrets_file"))
-    if not key:
+    keys = _codex_api_keys(config.get("config_path"), secrets_file=config.get("secrets_file"))
+    if not keys:
         raise ProviderError("CODEX_API_KEY is required for Responses API review")
+    credentials = list(enumerate(keys, 1))
     from .secrets import secret_values
-    secrets = sorted(set(secret_values(config_path=config.get("config_path"), secrets_file=config.get("secrets_file"))) | {key},
+    secrets = sorted(set(secret_values(config_path=config.get("config_path"), secrets_file=config.get("secrets_file"))) | set(keys),
                      key=len, reverse=True)
     base = validate_api_base_url(read_secret("CODEX_BASE_URL", config_path=config.get("config_path"),
                                               secrets_file=config.get("secrets_file")) or "https://api.openai.com/v1")
@@ -422,7 +434,7 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
             if len(payload) > MAX_TRANSCRIPT_BYTES:
                 receipt["output_limit_exceeded"] = True
                 raise ProviderError("API review request exceeded its transcript limit")
-            response, wire_hash = _request(payload, key, base + "/responses", proxy, deadline, receipt, out, number)
+            response, wire_hash = _request(payload, credentials, base + "/responses", proxy, deadline, receipt, out, number)
             response = _redact(response, secrets, protocol=True)
             response_path = out / "responses" / f"turn-{number:04d}.json"
             response_hash, size = _save(response_path, response)

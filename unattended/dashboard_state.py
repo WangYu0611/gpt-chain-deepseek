@@ -13,7 +13,8 @@ import stat
 from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
-from .config import CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, codex_coding_settings, load_config
+from .config import (CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, codex_coding_settings,
+                     codex_review_transport, codex_role_settings, load_config)
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
 TAIL_BYTES = 128 * 1024
@@ -313,6 +314,8 @@ def _codex_route(runtime, directory, kind):
                   api.get("coding_protocol") == "codex_exec_v1" and api.get("coding_sandbox") == "workspace-write" and
                   api.get("codex_auth_mode") == "chatgpt" and type(api.get("exit_code")) is int)
         return ("chatgpt" if native else None), directory
+    if api.get("kind") == kind and api.get("codex_auth_mode") == "chatgpt" and type(api.get("exit_code")) is int:
+        return "chatgpt", directory
     if api.get("kind") != kind or api.get("codex_auth_mode") != "api_key" or type(api.get("exit_code")) is not int:
         return None, directory
     try:
@@ -693,8 +696,8 @@ def _codex_code_model(runtime, task, operation, directory, session):
 
 def _operation_model(runtime, operation, directory, session=None, *, allow_notifications=False):
     """Return recorded model identity, never infer an old invocation from today's config."""
-    model = _clean(operation.get("planning_model"), 120)
-    effort = _clean(operation.get("planning_reasoning_effort"), 40)
+    model = _clean(operation.get("planning_model") or operation.get("review_model"), 120)
+    effort = _clean(operation.get("planning_reasoning_effort") or operation.get("review_reasoning_effort"), 40)
     if model:
         return model, effort or None
     if directory is None:
@@ -896,8 +899,14 @@ def _workflow(snapshot, config, state, operation, directory=None):
     selection = state.get("planning_selection") or {}
     if not isinstance(selection, dict) or not isinstance(milestone, dict):
         selection, milestone = {}, {}
-    claude, codex = config.get("claude", {}), config.get("codex", {})
+    claude = config.get("claude", {})
+    review_model, review_effort = codex_role_settings(config, "review")
+    codex = {"model": review_model, "reasoning_effort": review_effort}
     planner = config.get("planning_provider", "codex")
+    plan = config.get(planner, {})
+    if planner == "codex":
+        plan_model, plan_effort = codex_role_settings(config, "plan")
+        plan = {"model": plan_model, "reasoning_effort": plan_effort}
     coder = config.get("coding_provider", "dsh")
     replans = [row for row in task.get("replanning_history", []) if isinstance(row, dict) and row.get("task_id") == task.get("id")]
     tier = "critical" if phase == "REPLAN" or replans else operation.get("planning_level") or selection.get("planning_level")
@@ -911,7 +920,8 @@ def _workflow(snapshot, config, state, operation, directory=None):
     source, draft = _planning_source(Path(config["runtime_dir"]), source_value)
     level = task.get("planning_level") or (milestone.get("proposal") or {}).get("planning_level")
     route = "critical" if tier == "critical" or level == "critical" else "routine" if level == "routine" else "unknown"
-    critical_enabled = (planner == "claude" and bool(claude.get("critical_plan_model"))) or route == "critical"
+    critical_enabled = (planner == "claude" and bool(claude.get("critical_plan_model"))) or route == "critical" or (
+        planner == "codex" and config.get("codex", {}).get("tiered_planning") is True)
     check_rows = snapshot["checks"]
     previous_checks = phase in {"CODE", "REPLAN"} and bool(check_rows)
     if previous_checks:
@@ -932,8 +942,8 @@ def _workflow(snapshot, config, state, operation, directory=None):
         "milestone_publish": published,
     }
     roles = [
-        ("routine_planner", "常规任务规划", "明确本轮任务范围、验收条件和核心测试，判断是否涉及关键系统。", config.get(planner, {})),
-        ("critical_planner", "关键系统规划", "核对关键系统边界、兼容性和跨模块行为，形成最终任务书。", {"model": claude.get("critical_plan_model"), "reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort"))}),
+        ("routine_planner", "常规任务规划", "明确本轮任务范围、验收条件和核心测试，判断是否涉及关键系统。", plan),
+        ("critical_planner", "关键系统规划", "核对关键系统边界、兼容性和跨模块行为，形成最终任务书。", plan if planner == "codex" else {"model": claude.get("critical_plan_model"), "reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort"))}),
         ("developer", "功能开发", "按任务书修改代码、运行提交前验证并提交本地变更。",
          _coding_settings(config)),
         ("checks", "构建与测试", "在固定提交上独立运行构建、核心测试及阶段检查。", {}),
@@ -961,7 +971,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
     expected_kind = {"routine_plan": "plan", "critical_plan": "plan", "code": "code", "check": "milestone_check" if phase == "MILESTONE_REVIEW" else "check",
                      "review": "review", "milestone_review": "review"}.get(current)
     owns_operation = operation.get("task_id", task.get("id")) == task.get("id")
-    if phase == "REPLAN":
+    if phase == "REPLAN" and planner == "claude":
         pending = task.get("replanning") or {}
         head = (pending.get("fingerprint") or {}).get("head_sha")
         owns_operation = (owns_operation and operation.get("task_id") == task.get("id") and bool(head) and
@@ -1046,7 +1056,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
             model, effort, model_source = None, None, "unknown"
         summary = status["summary"] if identity == current else labels[node_state]
         if identity == "critical_plan" and (phase == "REPLAN" or replans):
-            title = "Claude重新分析修复计划"
+            title = ("Codex" if planner == "codex" else "Claude") + "重新分析修复计划"
             if identity != current:
                 summary = "本任务修复计划已返回；后续仍需独立检查和审核。"
             elif phase == "REPLAN":
@@ -1116,6 +1126,7 @@ def _workflow(snapshot, config, state, operation, directory=None):
 
 def _full_flow_context(config, state=None):
     """Validate a single explicit isolated run; never follow request-provided roots."""
+    from .full_flow_checks import full_flow_provider
     runtime = Path(config["runtime_dir"]).absolute()
     pointer_path = _confined(runtime, runtime / "full-flow/current.json")
     if not pointer_path.exists():
@@ -1141,26 +1152,29 @@ def _full_flow_context(config, state=None):
     if request.get("request_sha256") != digest or pointer.get("request_sha256") != digest:
         raise ValueError("全流程测试请求绑定摘要不匹配")
     source, project = _confined(runtime, runtime / "workspace"), _confined(run, run / "project")
+    provider = full_flow_provider(request.get("model"), request.get("effort"))
     if (request.get("version") != 1 or request.get("id") != identity or
             not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", str(request.get("task_id") or "")) or
             not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", str(request.get("head_sha") or "")) or
             request.get("runtime_dir") != str(runtime) or request.get("source_workspace") != str(source) or
             request.get("run_dir") != str(run) or request.get("project_dir") != str(project) or
             not isinstance(request.get("engine_dir"), str) or not Path(request["engine_dir"]).is_absolute() or
-            _iso(request.get("authorized_at")) is None or request.get("model") not in CLAUDE_PINNED_MODELS or request.get("effort") != "high"):
+            _iso(request.get("authorized_at")) is None or provider is None):
         raise ValueError("全流程测试任务、版本或隔离目录绑定不匹配")
     status = _object(_confined(run, run / "status.json"), missing={}, maximum=65536)
     phases = {"planning", "preparing", "testing", "analyzing", "completed", "failed"}
     stages = {"plan", "prepare", "build", "regression", "visual", "package", "package-short", "retest", "analysis"}
     native = next((_confined(run, run / "native" / phase) for phase in _FULL_FLOW_NATIVE_PHASES
                    if status.get("output_dir") == str(run / "native" / phase)), None)
+    legacy_selection_changed = provider == "claude" and any(status.get(key) != request[key] for key in ("model", "effort"))
     if (status.get("version") != 1 or status.get("id") != identity or status.get("request_sha256") != digest or
-            any(status.get(key) != request[key] for key in ("task_id", "head_sha", "model", "effort")) or
+            any(status.get(key) != request[key] for key in ("task_id", "head_sha")) or legacy_selection_changed or
+            full_flow_provider(status.get("model"), status.get("effort")) != provider or
             status.get("status") not in phases or status.get("stage") not in stages or _iso(status.get("updated_at")) is None or native is None or
             status.get("report_path") not in (None, "", str(run / "report.md"))):
         raise ValueError("全流程测试状态与受信请求不匹配")
     return {"runtime": runtime, "run": run, "project": project, "source": source, "native": native,
-            "request": request, "status": status, "request_sha256": digest,
+            "request": request, "status": status, "request_sha256": digest, "provider": provider,
             "request_file_sha256": pointer["request_file_sha256"]}
 
 
@@ -1198,24 +1212,32 @@ def _workspace_head(source):
 
 
 def _full_flow_notification_proof(context):
-    """Only real test-native startup and terminal local facts are notification evidence."""
+    """Require an actual check runner or historical native test start before notifying."""
     request, status, run = (context[key] for key in ("request", "status", "run"))
-    try:
-        with _confined(run, run / "native/test/stdout.log").open("rb") as stream:
-            raw = stream.read(CLAUDE_SESSION_HEADER_BYTES)
-        first = next((line for line in raw.split(b"\n")[:-1] if line.strip()), None)
-        event = json.loads(first.decode("utf-8-sig")) if first else {}
-        if (event.get("type") != "system" or event.get("subtype") != "init" or event.get("model") != request["model"] or
-                not isinstance(event.get("session_id"), str) or not _CLAUDE_SESSION_ID.fullmatch(event["session_id"])):
-            return None
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None
-    proof = {"request_sha256": context["request_sha256"], "test_native_started": True, "terminal_evidence": False}
-    if status["status"] not in {"completed", "failed"}:
-        return proof
     def bound(value, stage):
         return (value.get("version") == 1 and value.get("id") == request["id"] and value.get("task_id") == request["task_id"] and
                 value.get("head_sha") == request["head_sha"] and value.get("request_sha256") == context["request_sha256"] and value.get("stage") == stage)
+    codex = context.get("provider") == "codex"
+    try:
+        if codex:
+            build = _object(_confined(run, run / "checks/build/receipt.json"), missing={}, maximum=_FULL_FLOW_RECORD_BYTES)
+            if (not bound(build, "build") or not _iso(build.get("started_at")) or
+                    build.get("status") not in {"running", "passed", "failed"} or not _full_flow_runner_bound(context, build)):
+                return None
+        else:
+            with _confined(run, run / "native/test/stdout.log").open("rb") as stream:
+                raw = stream.read(CLAUDE_SESSION_HEADER_BYTES)
+            first = next((line for line in raw.split(b"\n")[:-1] if line.strip()), None)
+            event = json.loads(first.decode("utf-8-sig")) if first else {}
+            if (event.get("type") != "system" or event.get("subtype") != "init" or event.get("model") != request["model"] or
+                    not isinstance(event.get("session_id"), str) or not _CLAUDE_SESSION_ID.fullmatch(event["session_id"])):
+                return None
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    proof = {"request_sha256": context["request_sha256"], "test_started" if codex else "test_native_started": True,
+             "terminal_evidence": False}
+    if status["status"] not in {"completed", "failed"}:
+        return proof
     try:
         receipts = []
         for stage in ("prepare", "build", "regression", "visual", "package"):
@@ -1387,7 +1409,7 @@ def _full_flow_stage_projection(context, labels):
         stages = [stage for stage, _ in running]
         result.update(stage="conflict", stage_label="阶段回执冲突", stage_source="conflict", stage_conflicts=stages,
                       summary=_clean("多个阶段同时标记运行中：" + "、".join(labels[stage] for stage in stages) + "。暂不判定当前阶段。", 159))
-    elif status["status"] in {"testing", "analyzing"} and status["stage"] != "analysis":
+    elif context.get("provider") != "codex" and status["status"] in {"testing", "analyzing"} and status["stage"] != "analysis":
         result.update(stage="analysis", stage_label=labels["analysis"], stage_source="fallback",
                       summary=f"当前没有绑定阶段标记为运行中；等待 {_pinned_claude_label(request['model'])} 分析或安排下一步。")
     return result
@@ -1398,12 +1420,21 @@ def _full_flow_snapshot(config, state, *, context=None):
     if context is None:
         return None
     request, status, native, run = (context[key] for key in ("request", "status", "native", "run"))
+    codex = context.get("provider") == "codex"
+    model, effort = status["model"], status["effort"]
     source = "configured"
     try:
         with _confined(run, native / "stdout.log").open("rb") as stream:
             header = stream.read(CLAUDE_SESSION_HEADER_BYTES)
         first = next((line for line in header.split(b"\n")[:-1] if line.strip()), None)
         opening = json.loads(first.decode("utf-8-sig")) if first else {}
+        if codex and (opening.get("type") == "thread.started" and
+                      _CLAUDE_SESSION_ID.fullmatch(str(opening.get("thread_id") or "")) and
+                      re.fullmatch(re.escape(model) + r"(?:-\d{4}-\d{2}-\d{2})?", str(opening.get("model") or ""))):
+            invocation = _object(_confined(run, native / "invocation.json"), missing={}, maximum=65536)
+            if (invocation.get("provider") == "codex" and invocation.get("model") == model and invocation.get("effort") == effort and
+                    all(invocation.get(key) == request[key] for key in ("id", "task_id", "head_sha", "request_sha256"))):
+                source = "recorded"
         if (opening.get("type") == "system" and opening.get("subtype") == "init" and opening.get("model") == request["model"] and
                 isinstance(opening.get("session_id"), str) and _CLAUDE_SESSION_ID.fullmatch(opening["session_id"])):
             source = "recorded"
@@ -1418,10 +1449,12 @@ def _full_flow_snapshot(config, state, *, context=None):
     historical = bool(current_head and current_head != request["head_sha"] or task_id and task_id != request["task_id"])
     labels = {"planning": "只读规划", "preparing": "准备隔离测试环境", "testing": "执行全流程测试", "analyzing": "分析测试结果", "completed": "本次测试已结束", "failed": "本次测试未完成"}
     stages = {"plan": "测试规划", "prepare": "准备环境", "build": "构建", "regression": "回归测试", "visual": "视觉检查", "package": "打包验证", "package-short": "短路径正式打包补测", "retest": "失败项逐项复测", "analysis": "结果分析"}
-    public = {"id": request["id"], "title": _pinned_claude_label(request["model"]) + "全流程测试", "task_id": request["task_id"], "head_sha": request["head_sha"],
+    actor = "Codex" if codex else "Claude Code"
+    title = ("Codex" if codex else _pinned_claude_label(model)) + "全流程测试"
+    public = {"id": request["id"], "title": title, "task_id": request["task_id"], "head_sha": request["head_sha"],
             "current_head_sha": current_head, "historical": historical, "status": status["status"], "status_label": labels[status["status"]],
             "stage": status["stage"], "stage_label": stages[status["stage"]], "summary": _clean(status.get("summary"), 159),
-            "updated_at": _iso(status["updated_at"]), "actor": "Claude Code", "model": request["model"], "effort": request["effort"],
+            "updated_at": _iso(status["updated_at"]), "actor": actor, "model": model, "effort": effort,
             "model_source": source, "detail_url": "/api/flow/detail?lane=development&node=full_flow_test"}
     public.update(_full_flow_stage_projection(context, stages))
     proof = _full_flow_notification_proof(context)
@@ -1573,9 +1606,12 @@ def collect_snapshot(config_path: Path) -> dict:
             for role, name in (("codex", "Codex"), (coding_provider, coding_name), (planning_provider, planning_name))
         }
         codex = config["codex"]
+        model, effort = codex_role_settings(config, "review", now=now)
+        snapshot["models"]["codex"].update(model=_clean(model, 120) or "配置默认模型",
+                                          effort=_clean(effort, 40) or "默认")
         policy = codex.get("auth_mode", "inherit")
         snapshot["codex_auth"]["policy"] = "api_then_subscription" if codex.get("subscription_fallback") is True else policy
-        if codex.get("review_transport") == "responses_api":
+        if codex_review_transport(config, now=now) == "responses_api":
             snapshot["codex_auth"]["policy"] = "responses_api"
         snapshot["check_progress"]["total"] = len(config["checks"])
         snapshot["worker"] = _worker(runtime, config_path, now)
@@ -1626,15 +1662,16 @@ def collect_snapshot(config_path: Path) -> dict:
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             snapshot["maintenance"] = None
         retry_error = None
-        if operation_phase == "REPLAN":
+        if operation_phase == "REPLAN" and planning_provider == "claude":
             planning_name = "Claude Code"
         elif operation.get("kind") == "plan":
             planning_name = "Claude Code" if operation.get("planning_provider", "codex") == "claude" else "Codex"
         selection = operation if operation.get("planning_model") else state.get("planning_selection") or {}
-        if phase in {"PLAN", "REPLAN"} and planning_name == "Claude Code" and selection.get("planning_model"):
-            snapshot["models"].setdefault("claude", {"name": "Claude Code"}).update(
-                model=_clean(selection["planning_model"], 120),
-                effort=_clean(selection.get("planning_reasoning_effort"), 40) or "默认")
+        if phase in {"PLAN", "REPLAN"} and selection.get("planning_model"):
+            if planning_name == "Claude Code":
+                snapshot["models"].setdefault("claude", {"name": "Claude Code"}).update(
+                    model=_clean(selection["planning_model"], 120),
+                    effort=_clean(selection.get("planning_reasoning_effort"), 40) or "默认")
             snapshot["planning_selection"] = {
                 "model": _clean(selection["planning_model"], 120),
                 "level": _clean(selection.get("planning_level"), 40),
@@ -1657,6 +1694,8 @@ def collect_snapshot(config_path: Path) -> dict:
                 "status": "pending_manual_confirmation" if record.get("status") == "pending_manual_confirmation" else "unknown",
             })
         label, actor = _PHASES[phase]
+        if phase == "REPLAN" and planning_provider == "codex":
+            label, actor = "重新规划修复", "Codex"
         if phase == "CODE":
             actor = coding_name
         elif phase in {"PLAN", "REPLAN"}:
@@ -1726,7 +1765,7 @@ def collect_snapshot(config_path: Path) -> dict:
             source = (((task or {}).get("replanning") or {}).get("fingerprint") or {})
             head = source.get("head_sha")
             owns_operation = (owns_operation and operation.get("task_id") == task_id and bool(head) and
-                              operation.get("head_sha") == head and operation.get("planning_provider") == "claude" and
+                              operation.get("head_sha") == head and operation.get("planning_provider") == planning_provider and
                               operation.get("planning_level") == "critical" and
                               ((((task or {}).get("replanning") or {}).get("source_phase") == "CODE") or
                                head in {((task or {}).get("candidate") or {}).get("head_sha"), (task or {}).get("code_base"), state.get("expected_head")}))
@@ -1744,7 +1783,8 @@ def collect_snapshot(config_path: Path) -> dict:
             check_id = configured_checks[len(results)]["id"]
         snapshot["check_progress"]["current_id"] = check_id
         directory = _operation_directory(runtime, operation)
-        if operation_phase == "REPLAN" and (not owns_operation or not _replanning_model(runtime, operation, directory)[0]):
+        if operation_phase == "REPLAN" and (not owns_operation or
+                (planning_provider == "claude" and not _replanning_model(runtime, operation, directory)[0])):
             status["started_at"] = None
             if not owns_operation:
                 directory = None
@@ -1754,7 +1794,7 @@ def collect_snapshot(config_path: Path) -> dict:
             kind == "code" and operation.get("coding_provider") == "codex")
         if directory and owns_operation and codex_kind and kind == codex_kind and codex_operation:
             mode, directory = _codex_route(runtime, directory, codex_kind)
-            snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt" and kind != "code")
+            snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt" and directory.name == _CODEX_SUBSCRIPTION_DIR)
         elif directory and owns_operation and (
                 kind == "code" and operation.get("coding_provider") == "claude" or
                 kind == "plan" and operation.get("planning_provider") == "claude"):

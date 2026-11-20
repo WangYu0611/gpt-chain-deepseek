@@ -98,7 +98,7 @@ class SnapshotCache:
                                 "blocked": "任务阻塞", "worker_exit": "后台异常", "window_end": "收工简报",
                                 "art_review_ready": "模型待视觉验收", "art_accepted": "模型通过意见已提交",
                                 "art_rework": "模型返工意见已提交", "art_blocked": "模型制作异常",
-                                "full_flow_started": "Opus全流程测试已启动", "full_flow_finished": "Opus全流程测试已结束"}.get(value.get("last_event"))
+                                "full_flow_started": "全流程测试已启动", "full_flow_finished": "全流程测试已结束"}.get(value.get("last_event"))
         public["last_error"] = {"delivery_failed": "投递失败，将按退避策略重试", "http_error": "飞书连接失败",
                                 "bot_rejected": "机器人拒绝卡片，请检查飞书机器人安全设置",
                                 "redirect_rejected": "通知地址发生重定向，已拒绝发送",

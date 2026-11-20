@@ -61,6 +61,12 @@ class UserRepairTests(unittest.TestCase):
     def activate(self):
         return self.engine.activate_user_repair(self.path)
 
+    def test_codex_only_rejects_legacy_repair_activation_without_changing_state(self):
+        self.config["codex_only"] = True
+        with self.assertRaisesRegex(ValueError, "旧原生专项修复入口已停用"):
+            self.activate()
+        self.assertEqual(self.f.state(), self.before)
+
     def test_authorized_accepted_review_can_expand_scope_without_rewriting_baseline_or_history(self):
         result = self.activate(); after = self.f.state(); task = after["task"]
         self.assertEqual(result["phase"], "CODE"); self.assertEqual(task["reworks"], 10)

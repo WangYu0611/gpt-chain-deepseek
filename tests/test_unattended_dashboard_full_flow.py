@@ -89,6 +89,22 @@ class FullFlowDashboardTests(unittest.TestCase):
         self.assertEqual(value["status"]["code"], "blocked")
         self.assertIn("历史版本", self.detail()["scope_label"])
 
+    def test_codex_run_displays_effective_sunday_effort_from_the_bound_invocation(self):
+        self.request.update(model="gpt-6.2-astra", effort="ultra")
+        self.status.update(model="gpt-6.2-astra", effort="high")
+        self.bind()
+        self.assertEqual(self.snapshot()["full_flow_test"]["model_source"], "configured")
+        opening = {"type": "thread.started", "thread_id": "550e8400-e29b-41d4-a716-446655440001",
+                   "model": "gpt-6.2-astra"}
+        (self.native / "stdout.log").write_text(json.dumps(opening) + "\n", encoding="utf-8")
+        invocation = {"provider": "codex", "model": "gpt-6.2-astra", "effort": "high",
+                      **{key: self.request[key] for key in ("id", "task_id", "head_sha", "request_sha256")}}
+        self.base.write(self.native / "invocation.json", invocation)
+        test = self.snapshot()["full_flow_test"]
+        self.assertEqual((test["actor"], test["model"], test["effort"], test["model_source"]),
+                         ("Codex", "gpt-6.2-astra", "high", "recorded"))
+        self.assertEqual(self.detail()["actor"], "Codex")
+
     def accepted_repair(self):
         head, task_id = "c" * 40, self.task["id"]
         authorization = {"version": 1, "id": "d" * 32, "task_id": task_id, "model": "claude-opus-5-5",

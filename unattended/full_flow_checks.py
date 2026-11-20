@@ -1,4 +1,4 @@
-"""Fixed, isolated full-game checks invoked by the authorized read-only planner.
+"""Fixed, isolated full-game checks for a user-authorized operator request.
 
 This runner never updates the development task or its acceptance. The request
 selects one committed snapshot, not commands, executable paths, or test subsets.
@@ -44,6 +44,14 @@ def request_hash(request: dict) -> str:
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def full_flow_provider(model, effort):
+    if isinstance(model, str) and model in CLAUDE_PINNED_MODELS and effort == "high":
+        return "claude"
+    if isinstance(model, str) and re.fullmatch(r"gpt-[a-zA-Z0-9.-]{1,70}", model) and effort in ("high", "ultra"):
+        return "codex"
+    return None
+
+
 def _absolute(value, field):
     if not isinstance(value, str) or not Path(value).is_absolute():
         raise ValueError(field + " must be an absolute path")
@@ -63,8 +71,8 @@ def load_request(path: Path) -> dict:
         raise ValueError("Invalid full-flow identity")
     if not isinstance(request["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", request["head_sha"]):
         raise ValueError("An exact Git SHA is required")
-    if not isinstance(request["model"], str) or request["model"] not in CLAUDE_PINNED_MODELS or request["effort"] != "high":
-        raise ValueError("This authorized run requires a pinned Claude/high selection")
+    if not full_flow_provider(request["model"], request["effort"]):
+        raise ValueError("This authorized run requires a supported planning and verification model")
     if request["request_sha256"] != request_hash(request):
         raise ValueError("Canonical request SHA does not match")
     if datetime.fromisoformat(request["authorized_at"]).utcoffset() is None:

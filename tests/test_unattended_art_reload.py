@@ -249,7 +249,7 @@ class ArtReloadTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "foreign"): self.request()
         self.manager.scheduler.foreign = False
         original = self.manager.config.pop("art_pipeline")
-        with self.assertRaisesRegex(ValueError, "独立 Claude"): self.request()
+        with self.assertRaisesRegex(ValueError, "独立编码"): self.request()
         self.manager.config["art_pipeline"] = original
         self.assertFalse(self.pause.exists())
         self.assertEqual(self.manager.scheduler.calls, [])

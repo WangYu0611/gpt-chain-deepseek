@@ -1,84 +1,75 @@
-"""Run a user-requested, isolated whole-flow test with the configured Claude model.
-
-This operator job does not grant a rework, change the coding model, or accept a
-game task. The original workspace stays paused while a fixed commit is tested.
-"""
+"""Run an isolated, user-requested full-flow test at one fixed commit."""
 from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
-import shlex
-import sys
 import tempfile
+import time
 import uuid
 
-from github_harness_lab.lab_harness.process import run_process
-from . import gitops, ue_checks
-from .config import CLAUDE_PINNED_MODELS, claude_execution_model, load_config
-from .full_flow_native import parse_full_flow_native
-from .providers import (_claude_command, _claude_environment, _claude_log_record,
-                        _claude_model_evidence, _claude_turn, claude_subscription_ready)
+from github_harness_lab.lab_harness.process import run_process, safe_environment
+from . import full_flow_checks, gitops, ue_checks
+from .config import codex_role_settings, load_config
+from .network import proxy_environment
+from .providers import AgentProviders, _codex_command, _strict_json, parse_codex_events
+from .secrets import secret_values
 from .storage import lock, read_json, write_json, write_text
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = "claude-opus-5-5"
-EFFORT = "high"
-STAGES = ("prepare", "build", "regression", "visual", "package", "retest", "status")
+STAGES = full_flow_checks.STAGES
+_BINDING_KEYS = ("id", "task_id", "head_sha", "request_sha256")
+_TERMINAL = {"passed", "failed"}
 
 
 def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def canonical_hash(request):
-    value = {key: value for key, value in request.items() if key != "request_sha256"}
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+canonical_hash = full_flow_checks.request_hash
 
 
 def file_hash(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def _task_output_directory(source, session):
+    """Read location for historical Claude receipts."""
     uuid.UUID(session)
     project_key = re.sub(r"[^A-Za-z0-9]", "-", str(source))
     return Path(tempfile.gettempdir()) / "claude" / project_key / session / "tasks"
 
 
 def _request(path):
-    path = Path(path).resolve(strict=True)
-    value = read_json(path)
-    ident = value.get("id", "")
-    if not re.fullmatch(r"[0-9a-f]{32}", ident):
+    request = full_flow_checks.load_request(Path(path).absolute())
+    if not re.fullmatch(r"[0-9a-f]{32}", request["id"]):
         raise ValueError("Invalid full-flow request identity")
-    runtime = Path(value["runtime_dir"]).resolve(strict=True)
-    run = runtime / "full-flow" / "runs" / ident
-    if (path != run / "request.json" or Path(value["run_dir"]).resolve() != run or
-            Path(value["project_dir"]).resolve() != run / "project" or
-            Path(value["source_workspace"]).resolve() != runtime / "workspace" or
-            not isinstance(value.get("model"), str) or value["model"] not in CLAUDE_PINNED_MODELS or value.get("effort") != EFFORT or
-            value.get("request_sha256") != canonical_hash(value)):
+    run = Path(request["run_dir"])
+    if Path(request["source_workspace"]) != Path(request["runtime_dir"]) / "workspace":
         raise ValueError("Full-flow request binding changed")
-    return value, run
+    return request, run
 
 
 def _status(request, run, **changes):
     path = run / "status.json"
     value = read_json(path) if path.exists() else {}
-    value.update(version=1, id=request["id"], request_sha256=request["request_sha256"],
-                 task_id=request["task_id"], head_sha=request["head_sha"], model=request["model"],
-                 effort=request["effort"], updated_at=now(), **changes)
+    value.update(version=1, **{key: request[key] for key in _BINDING_KEYS}, updated_at=now())
+    value.setdefault("model", request["model"])
+    value.setdefault("effort", request["effort"])
+    value.update(changes)
     write_json(path, value)
 
 
 def create(config_path):
     config = load_config(config_path)
-    selected_model = claude_execution_model(config)
+    selected_model, selected_effort = codex_role_settings(config, "plan")
+    if full_flow_checks.full_flow_provider(selected_model, selected_effort) != "codex":
+        raise ValueError("Full-flow planning requires a configured Codex model at high or ultra effort")
     runtime = Path(config["runtime_dir"]).resolve()
     base = runtime / "full-flow"
     with lock(base / "operator.lock"):
@@ -91,7 +82,7 @@ def create(config_path):
             raise RuntimeError("An intact task/session and clean candidate are required")
         current = base / "current.json"
         if current.exists():
-            old, old_run = _request(runtime / read_json(current)["request_path"])
+            _, old_run = _request(runtime / read_json(current)["request_path"])
             if read_json(old_run / "status.json").get("status") not in {"completed", "failed"}:
                 raise RuntimeError("A full-flow test is already pending")
         ident = uuid.uuid4().hex
@@ -103,248 +94,184 @@ def create(config_path):
         if owned:
             with pause.open("x", encoding="utf-8", newline="\n") as stream:
                 stream.write(token)
-        request = {"version": 1, "id": ident, "task_id": task["id"],
-                   "head_sha": gitops.head(source), "source_workspace": str(source),
-                   "runtime_dir": str(runtime), "run_dir": str(run),
+        request = {"version": 1, "id": ident, "task_id": task["id"], "head_sha": gitops.head(source),
+                   "source_workspace": str(source), "runtime_dir": str(runtime), "run_dir": str(run),
                    "project_dir": str(run / "project"),
                    "engine_dir": "C:/Program Files/Epic Games/UE_5.8/Engine",
-                   "authorized_at": now(), "model": selected_model, "effort": EFFORT}
+                   "authorized_at": now(), "model": selected_model, "effort": selected_effort}
         request["request_sha256"] = canonical_hash(request)
         write_json(run / "request.json", request)
-        write_json(run / "operator.json", {"user_request": "使用配置的 Claude 模型执行完整流程测试",
+        write_json(run / "operator.json", {"user_request": "使用 Codex 执行完整流程测试",
                    "source_session": task["session_id"], "source_state_sha256": file_hash(runtime / "state.json"),
-                   "source_reworks": task["reworks"], "owns_pause": owned,
-                   "pause_token": token if owned else None,
+                   "source_reworks": task["reworks"], "owns_pause": owned, "pause_token": token if owned else None,
                    "pause_sha256": file_hash(pause), "pause_mtime_ns": pause.stat().st_mtime_ns,
                    "authorized_at": request["authorized_at"]})
-        _status(request, run, status="planning", stage="plan", summary=selected_model + " 正在核对完整测试范围。",
+        _status(request, run, status="planning", stage="plan", summary="Codex 正在等待规划全流程测试。",
                 output_dir=str(run / "native" / "plan"))
         write_json(current, {"version": 1, "id": ident,
                    "request_path": (Path("full-flow") / "runs" / ident / "request.json").as_posix(),
                    "request_sha256": request["request_sha256"],
                    "request_file_sha256": file_hash(run / "request.json")})
         return {"request": str(run / "request.json"), "status": "created", "model": selected_model,
-                "head_sha": request["head_sha"]}
+                "effort": selected_effort, "head_sha": request["head_sha"]}
+
+
+def _assert_source(request, run):
+    runtime, source = Path(request["runtime_dir"]), Path(request["source_workspace"])
+    operator = read_json(run / "operator.json")
+    state = read_json(runtime / "state.json")
+    task = state.get("task") or {}
+    if (state.get("phase") != "BLOCKED" or state.get("operation") or task.get("id") != request["task_id"] or
+            task.get("session_id") != operator["source_session"] or gitops.head(source) != request["head_sha"] or
+            not gitops.clean(source)):
+        raise RuntimeError("The original task, session, or clean candidate changed")
+
+
+def _native_turn(config, source, output, prompt, model, effort):
+    command = _codex_command(config.get("codex", {}).get("command"))
+    environment = safe_environment()
+    environment.update(proxy_environment(config_path=config.get("config_path"),
+                                         secrets_file=config.get("secrets_file"), network_file=config.get("network_file")))
+    for name in ("CODEX_HOME", "NODE_EXTRA_CA_CERTS"):
+        if os.environ.get(name):
+            environment[name] = os.environ[name]
+    AgentProviders._check_codex_subscription(command, source, environment, time.monotonic() + 15)
+    argv = [*command, "--no-daemon", "-a", "never", "exec", "--ignore-user-config", "--sandbox", "read-only",
+            "--json", "--color", "never", "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
+            "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"']
+    if os.name == "nt":
+        argv.extend(["-c", 'windows.sandbox="elevated"'])
+    argv.append("-")
+    result = run_process(argv, cwd=source, output_dir=output, timeout_seconds=1800,
+                         environment=environment, stdin=prompt.encode("utf-8"),
+                         secrets=secret_values(config_path=config.get("config_path"), secrets_file=config.get("secrets_file")),
+                         max_output_bytes=64 * 1024 * 1024)
+    receipt = {"exit_code": result.exit_code, "timed_out": result.timed_out,
+               "output_limit_exceeded": result.output_limit_exceeded, "finished_at": now(),
+               "model_selection": {"requested_model": model, "requested_reasoning_effort": effort}}
+    write_json(output / "process.json", receipt)
+    if result.exit_code or result.timed_out or result.output_limit_exceeded:
+        raise RuntimeError("Native Codex full-flow invocation did not complete")
+    log = output / "stdout.log"
+    session = parse_codex_events(log, exit_code=result.exit_code)["session_id"]
+    uuid.UUID(session)
+    answer = observed_model = None
+    with log.open(encoding="utf-8-sig") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = _strict_json(line)
+            if event["type"] == "thread.started":
+                observed_model = event.get("model")
+            item = event.get("item")
+            if event["type"] == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+                answer = item.get("text")
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError("Native Codex full-flow response was empty")
+    if observed_model is not None and (not isinstance(observed_model, str) or
+            observed_model != model and not re.fullmatch(re.escape(model) + r"-\d{4}-\d{2}-\d{2}", observed_model)):
+        raise RuntimeError("Native Codex full-flow response names a different model")
+    receipt["model_selection"].update(observed_model=observed_model, model_verified=observed_model is not None)
+    write_json(output / "process.json", receipt)
+    return {"session_id": session, "answer": answer.strip(), "model_selection": receipt["model_selection"], "finished_at": now()}
+
+
+def _receipts(request, run):
+    results = {}
+    for stage in (*STAGES[:-1], "package-short"):
+        path = ue_checks._safe_under(run, Path("checks") / stage / "receipt.json")
+        if not path.is_file():
+            continue
+        row = ue_checks._object(path, maximum=16 * 1024 * 1024)
+        if row.get("stage") != stage or any(row.get(key) != request[key] for key in _BINDING_KEYS):
+            raise ValueError("Full-flow stage receipt belongs to another stage, request or HEAD")
+        if row.get("status") in _TERMINAL and row.get("finished_at"):
+            results[stage] = row["status"]
+    return results
+
+
+def _run_checks(request_path, request, run, output):
+    for stage in STAGES[:-1]:
+        _status(request, run, status="testing", stage=stage, output_dir=str(output),
+                summary="正在执行固定全流程检查。")
+        full_flow_checks.run_stage(request_path, stage)
+
+
+def _output_dir(run, phase):
+    candidates = (phase, *(f"analysis-{n}" for n in range(2, 10))) if phase == "analysis" else (phase,)
+    for name in candidates:
+        path = ue_checks._safe_under(run, Path("native") / name)
+        if not path.exists():
+            return path
+    raise RuntimeError("Full-flow phase already has an invocation")
 
 
 def invoke(config_path, request_path, phase):
+    if phase not in {"plan", "test", "analysis"}:
+        raise ValueError("Unknown full-flow phase")
     config = load_config(config_path)
     request, run = _request(request_path)
-    runtime = Path(request["runtime_dir"])
-    if Path(config["runtime_dir"]).resolve() != runtime:
+    if Path(config["runtime_dir"]).resolve() != Path(request["runtime_dir"]):
         raise ValueError("Config belongs to another runtime")
+    if full_flow_checks.full_flow_provider(request["model"], request["effort"]) != "codex":
+        raise RuntimeError("Historical Claude requests are read-only; create a Codex full-flow request")
+    _assert_source(request, run)
     source = Path(request["source_workspace"])
-    operator = read_json(run / "operator.json")
-    state = read_json(runtime / "state.json")
-    if (gitops.head(source) != request["head_sha"] or not gitops.clean(source) or
-            (state.get("task") or {}).get("session_id") != operator["source_session"]):
-        raise RuntimeError("The original task, session, or candidate changed")
-    settings = config["claude"]
-    selected_model, selected_effort = request["model"], request["effort"]
-    if settings.get("auth_mode", "subscription") == "subscription" and not claude_subscription_ready(settings, source):
-        raise RuntimeError("Native Claude subscription login is unavailable")
-    environment = _claude_environment(settings, config_path=config.get("config_path"),
-                                      secrets_file=config.get("secrets_file"), network_file=config.get("network_file"))
-    output = run / "native" / phase
-    if phase == "analysis" and output.exists():
-        output = next((run / "native" / f"analysis-{number}" for number in range(2, 10)
-                       if not (run / "native" / f"analysis-{number}").exists()), None)
-        if output is None:
-            raise RuntimeError("Full-flow continuation attempts are exhausted")
-    output.mkdir(parents=True, exist_ok=False)
-    documents = [source, runtime / "tasks" / request["task_id"], run]
     if phase != "plan":
-        plan = read_json(run / "native" / "plan" / "answer.json")
-        task_outputs = _task_output_directory(source, plan["session_id"])
-        task_outputs.mkdir(parents=True, exist_ok=True)
-        documents.extend([ROOT / "unattended", Path(sys.executable).resolve().parent])
-        documents.append(task_outputs)
-        engine_sources = Path(request["engine_dir"]) / "Source" / "Programs" / "UnrealBuildTool"
-        if engine_sources.is_dir():
-            documents.append(engine_sources)
-    argv = _claude_command(settings, read_only_dirs=documents)
-    argv += ["--print", "--output-format", "stream-json", "--verbose",
-             "--permission-mode", "plan" if phase == "plan" else "default",
-             "--permission-prompts", "none", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-             "--tools", "Read,Glob,Grep" if phase == "plan" else "Bash,Read,Glob,Grep",
-             "--disallowedTools", "mcp__*", "Edit", "Write"]
-    allowed_tools = ["Read", "Glob", "Grep"]
-    common = (
-        f"用户已授权本次完整流程测试。你是本次真实测试负责人，固定模型为{selected_model}、思考{selected_effort}。\n"
-        "这是一次完整测试，覆盖当前工程已实现流程及连带影响，不限于原来五项核心自验；不是要求宣称整个未完成的M3已完成。"
-        "由你独立判断测试覆盖、读取源码与真实回执，给出你自己的诊断，转达者的意见不作为结论。\n"
-        "本次仅测试：不改游戏源文件、定义或测试断言，不编码、不commit/push，不改变主任务的验收状态，不调用美术/付费API。"
-        "不终止用户已打开的UE编辑器或其他会话。主任务原代码/会话保留。未知或失败如实记录，不把退出码0当作测试全过。\n"
-        f"固定候选HEAD：{request['head_sha']}；原工程：{source.as_posix()}；本次目录：{run.as_posix()}。\n"
-        f"任务与各轮独立审核：{(runtime / 'tasks' / request['task_id']).as_posix()}。\n"
-        "第8、9轮review已accepted，但控制器把一个原约定非门槛的额外打包环境FAIL聚合成了返工；请自行核实。"
-        "这项控制器问题由维护者另行修复。测试不要修改历史回执、替代Codex独立审核或人工验收。\n"
-    )
-    if phase == "plan":
-        argv += ["--resume", operator["source_session"], "--fork-session"]
-        prompt = common + (
-            "现在先只读检查现状，自主给出这次全流程测试方案、覆盖范围、已知风险和结果判定规则。"
-            "下一次调用会给你隔离候选副本和固定测试工具，由你实际执行。工具将支持独立构建、"
-            "全部ZhuGuoCity.M自动回归、真实RHI必要玩法/界面验证、精确PackageIntegration打包和结果查询。"
-            "可提出你认为需要的其他验证，不能用文档检查冒充运行证据；不要声称现在已重测。"
-            "中文简明输出计划，并明确哪些历史人工待办无法由自动测试确认。"
-        )
-        status, stage, summary, timeout = "planning", "plan", selected_model + " 正在独立核对全流程测试方案。", 1800
-    else:
-        argv += ["--resume", plan["session_id"]]
-        helper = ROOT / "unattended" / "full_flow_checks.py"
-        commands = [shlex.join([Path(sys.executable).as_posix(), helper.as_posix(),
-                               "--request", Path(request_path).resolve().as_posix(), "--stage", name])
-                    for name in STAGES]
-        retry_command = shlex.join([Path(sys.executable).as_posix(), helper.as_posix(),
-                                   "--request", Path(request_path).resolve().as_posix(),
-                                   "--stage", "package", "--retry"])
-        allowed_tools.extend("Bash(" + command + ")" for command in commands)
-        allowed_tools.append("Bash(" + retry_command + ")")
-        supplemental = ""
-        if (run / "operator-short-package.json").exists():
-            authorization = read_json(run / "operator-short-package.json")
-            short_helper = ROOT / "unattended" / "full_flow_short_package.py"
-            if (any(authorization.get(key) != request[key] for key in
-                    ("id", "task_id", "head_sha", "request_sha256")) or
-                    authorization.get("runner_sha256") != file_hash(short_helper)):
-                raise RuntimeError("Supplemental short-package authorization changed")
-            short_command = shlex.join([Path(sys.executable).as_posix(), short_helper.as_posix(),
-                                       "--request", Path(request_path).resolve().as_posix()])
-            allowed_tools.append("Bash(" + short_command + ")")
-            supplemental = ("\n打包首轮的真实错误是隔离路径超过260字符，维护者已提供短路径环境补测工具。"
-                "它保持同HEAD/逐文件输入/正式PackageIntegration不变，并保留原失败；新证据归档checks/package-short。"
-                "按你原测试方案，请用Bash后台执行下面这个精确命令一次并等完成通知，核对新产物后更新最终报告；"
-                "不要因此重复已经完成的回归、画面或retest：\n" + short_command + "\n")
-        if (run / "operator-retest-recovery.json").exists():
-            recovery = read_json(run / "operator-retest-recovery.json")
-            recovery_helper = ROOT / "unattended" / "full_flow_retest_resume.py"
-            if (any(recovery.get(key) != request[key] for key in
-                    ("id", "task_id", "head_sha", "request_sha256")) or
-                    recovery.get("resume_runner_sha256") != file_hash(recovery_helper)):
-                raise RuntimeError("Interrupted retest recovery authorization changed")
-            recovery_command = shlex.join([Path(sys.executable).as_posix(), recovery_helper.as_posix(),
-                                          "--request", Path(request_path).resolve().as_posix()])
-            allowed_tools.append("Bash(" + recovery_command + ")")
-            supplemental += ("\n最新执行安排：短路径打包已经实际执行，读取它的回执即可，不再提交。"
-                "原retest因Bash后台默认600秒时限被原生系统停止：只有前30项完成，第31项有真实中断证据，32/33未启动。"
-                "维护者已签发operator-retest-recovery.json，严格绑定原生killed事件、原检查点和前30项哈希。"
-                "现在只调用下列恢复工具：保留30项，单独重新执行明确中断的31，并执行未开始的32/33；不重跑其他阶段。"
-                "必须Bash run_in_background=true并显式timeout=3600000，后台同样受默认时限约束；等通知后读回执。\n"
-                + recovery_command + "\n之后按实际结果更新完整报告，区分首次失败、重测、工具误报和环境阻断。")
-        prompt = common + (
-            ("本次已启用Bash后台任务。按本机CLI官方内置说明，后台命令完成会自动发送一次通知；"
-             "TaskOutput已移除，Monitor用于新建事件监听，不是等待已有任务。请等完成通知后用Read读取通知的output_file和回执。"
-             "保留原有prepare和所有真实回执，仅接续未完成阶段，不重跑已完成阶段。\n" if phase == "analysis" else "") +
-            "此前retest的工具哈希阻断已由维护者提供的operator-runner-migration.json精确解决；"
-            "原binding和原FAIL未改。retest会依据原始日志单列RHI解析误报校核，其他真实失败仍须按你原方案实际复测一次。\n"
-            "继续你刚才制定的方案，现在请实际执行一次全流程测试。固定工具会在本次目录导出同HEAD隔离副本，"
-            "不修改原工作区；机器上的全局LiveCoding占用以实际环境日志为准，隔离副本不能保证消除全局锁。"
-            "所有阶段原始日志和结构化回执都留在checks/下。\n"
-            "你可用Bash原样调用下列工具。prepare/status可前台执行；build/regression/visual/package必须"
-            "使用Bash的run_in_background=true启动，等原生完成通知后用Read读取通知里的output_file，再读对应receipt，"
-            "所有长命令均显式设置timeout=3600000，不能省略而触发默认600秒后台期限。"
-            "确认passed或failed后再下一阶段。后台输出目录已单独授权只读。等待时不要反复轮询、独立sleep或调用不存在的TaskOutput。"
-            "不要以Bash的600秒前台上限截断长测试。"
-            "各阶段串行执行，避免并发占用UE构建/打包资源；不要重复发起仍在运行的同一命令。"
-            "先prepare再build，其余阶段由你按真实依赖安排。regression只运行全部M系列；visual逐项正常RHI运行19项Local画面测试，"
-            "外加3项M3逻辑/控件测试，后者不能当作画面证据。retest仅从本批首轮regression/visual真实失败集合逐项再测一次，保留两轮结果。"
-            "全量regression含PackageIntegration的Success可能只是skip，"
-            "因此必须执行package阶段，让工具验证本次真实打包摘要；visual需正常RHI实际运行，不能用NullRHI结果代替。"
-            "一次完整验证要覆盖每个阶段；失败不等于停止所有其他有意义的独立验证。不要修改测试以求通过。\n"
-            + "\n".join(commands) + "\n"
-            "如果首次精确打包失败，可自行判断是否有意义，仅允许一次保留首轮日志的重试：\n"
-            + retry_command + "\n"
-            "每阶段回执和run/facts.json可用Read读取；工具stage status返回当前事实。"
-            "原工程Saved基线在run/source-saved-before.json（若存在），由维护者收尾核对；截图用Read逐张实际打开，不能只看文件存在。"
-            "如你需要其他验证但工具未覆盖，列明确切缺口，不猜测为PASS。不要自己运行任意shell、关进程或改脚本。"
-            "结束时用中文给出：实际通过/失败/未运行项目与数量，核心玩法是否稳定，环境问题与功能缺陷分开，"
-            "证据路径，以及你自己认为反复返工的原因及建议。结论必须基于本次运行，不把历史成功当新测试。"
-            "不要给自己无限重试，也不要代替独立审核宣布主任务通过。"
-            + supplemental
-        )
-        status, stage, summary, timeout = "testing", "prepare", selected_model + " 正在执行隔离全流程测试。", 25200
-    argv += ["--allowedTools", *allowed_tools, "--model", selected_model, "--effort", selected_effort]
-    write_text(output / "prompt.txt", prompt)
-    write_json(output / "invocation.json", {"model": selected_model, "effort": selected_effort, "phase": phase,
-               "request_sha256": request["request_sha256"], "head_sha": request["head_sha"],
-               "timeout_seconds": timeout, "started_at": now(), "read_only_roots": [str(p) for p in documents],
-               "orchestrator_sha256": file_hash(Path(__file__)),
-               "checks_sha256": file_hash(ROOT / "unattended" / "full_flow_checks.py"),
-               "native_parser_sha256": file_hash(ROOT / "unattended" / "full_flow_native.py"),
-               "background_tasks_enabled": phase != "plan"})
-    _status(request, run, status=status, stage=stage, summary=summary, output_dir=str(output))
-    print(json.dumps({"status": status, "output": str(output), "model": selected_model}, ensure_ascii=True), flush=True)
-    with lock(run / "native.lock"):
-        try:
-            if phase != "plan":
-                # Ordinary code calls keep the provider's no-background policy.
-                # This whole-flow job explicitly waits for each owned long task.
-                environment.pop("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", None)
-            result = run_process(argv, cwd=source, output_dir=output, timeout_seconds=timeout,
-                                 environment=environment, stdin=prompt.encode("utf-8"),
-                                 secrets=[environment[name] for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-                                          if environment.get(name)],
-                                 max_output_bytes=64 * 1024 * 1024, stdout_record_filter=_claude_log_record)
-            write_json(output / "process.json", {"exit_code": result.exit_code, "timed_out": result.timed_out,
-                       "output_limit_exceeded": result.output_limit_exceeded, "finished_at": now()})
-            if result.exit_code or result.timed_out or result.output_limit_exceeded:
-                _status(request, run, status="failed", stage=stage, summary=selected_model + " 本次调用未正常结束，保留全部现场与日志。")
-                raise RuntimeError("Native full-flow invocation failed; see " + str(output))
-            requested_session = None if phase == "plan" else plan["session_id"]
-            if phase == "plan":
-                session, terminal, errors, limit = _claude_turn(output / "stdout.log", requested_session)
-                model = _claude_model_evidence(output / "stdout.log", requested_session, selected_model, selected_effort)
-            else:
-                session, terminal, errors, limit, model = parse_full_flow_native(
-                    output / "stdout.log", requested_session, selected_model, selected_effort)
-            answer = terminal.get("result")
-            if (not model.get("model_verified") or errors or (limit or {}).get("status") == "rejected" or terminal.get("is_error") or
-                    not isinstance(answer, str) or not answer.strip()):
-                _status(request, run, status="failed", stage=stage, summary=selected_model + " 返回结果或模型证据无效。")
-                raise RuntimeError("Unverified native Claude result")
-            if phase == "plan" and session == operator["source_session"]:
-                raise RuntimeError("The planning call did not fork the original coding session")
-            if phase != "plan" and session != requested_session:
-                raise RuntimeError("Testing did not resume the verified Claude planning branch")
-            write_json(output / "answer.json", {"session_id": session, "answer": answer,
-                       "model_selection": model, "finished_at": now()})
-            write_text(output / "answer.md", answer)
-            if gitops.head(source) != request["head_sha"] or not gitops.clean(source):
-                raise RuntimeError("Testing changed the original candidate")
-            if phase == "plan":
-                _status(request, run, status="preparing", stage="prepare", summary=selected_model + " 方案已返回，正在准备隔离测试工具。")
-                outcome = "planned"
-            else:
-                missing = []
-                required_stages = list(STAGES[:-1])
-                if supplemental:
-                    required_stages.append("package-short")
-                for required in required_stages:
-                    receipt_path = ue_checks._safe_under(run, Path("checks") / required / "receipt.json")
-                    if not receipt_path.exists():
-                        missing.append(required)
-                        continue
-                    receipt = ue_checks._object(receipt_path, maximum=16 * 1024 * 1024)
-                    if any(receipt.get(key) != request[key] for key in
-                           ("id", "task_id", "request_sha256", "head_sha")):
-                        raise RuntimeError("Test receipt belongs to another candidate or request")
-                    if receipt.get("stage") != required:
-                        raise RuntimeError("Test receipt belongs to another stage")
-                    if receipt.get("status") not in {"passed", "failed"} or not receipt.get("finished_at"):
-                        missing.append(required)
-                write_text(run / "report.md", answer)
-                _status(request, run, status="failed" if missing else "completed", stage="analysis",
-                        report_path=str(run / "report.md"), missing_stages=missing,
-                        summary=(selected_model + " 已返回报告，但部分测试阶段尚未取得回执：" + ", ".join(missing)) if missing else
-                        selected_model + " 已完成本轮测试并给出报告；通过与失败以各阶段真实回执为准。")
-                outcome = "incomplete" if missing else "completed"
-            print(json.dumps({"status": outcome, "session": session,
-                              "output": str(output), "model_verified": True}, ensure_ascii=True), flush=True)
-        except Exception as error:
-            write_json(output / "operator-error.json", {"type": type(error).__name__, "error": str(error), "at": now()})
-            _status(request, run, status="failed", stage=stage, summary=selected_model + " 调用或证据核验失败，已保留日志：" + type(error).__name__)
-            raise
+        plan = read_json(ue_checks._safe_under(run, "native/plan/answer.json"))
+        if any(plan.get(key) != request[key] for key in _BINDING_KEYS):
+            raise ValueError("The Codex test plan belongs to another request or candidate")
+    output = _output_dir(run, phase)
+    output.mkdir(parents=True, exist_ok=False)
+    stage = "plan" if phase == "plan" else "analysis"
+    try:
+        if phase == "test":
+            _run_checks(Path(request_path).absolute(), request, run, output)
+        results = _receipts(request, run) if phase != "plan" else {}
+        missing = [name for name in STAGES[:-1] if name not in results] if phase != "plan" else []
+        role = "plan" if phase == "plan" else "review"
+        model, effort = codex_role_settings(config, role)
+        if full_flow_checks.full_flow_provider(model, effort) != "codex":
+            raise ValueError("Full-flow verification requires a configured Codex model at high or ultra effort")
+        _status(request, run, status="planning" if phase == "plan" else "analyzing", stage=stage,
+                output_dir=str(output), model=model, effort=effort, summary="Codex 正在只读核对全流程测试。")
+        common = (f"对固定提交 {request['head_sha']} 执行独立全流程验证。任务 {request['task_id']}。"
+                  f"原工作区 {source.as_posix()}，隔离测试目录 {run.as_posix()}。"
+                  "仅查看该任务、源码和测试证据。基于实际运行数据给出中文结论。")
+        if phase == "plan":
+            prompt = common + ("先报告测试方案、覆盖范围、已知风险和结果判定规则。"
+                               "固定检查覆盖构建、完整回归、真实 RHI、正式打包和失败项复测。")
+        else:
+            prompt = common + (f"\n已完成的阶段状态为 {json.dumps(results, ensure_ascii=False)}。"
+                               f"缺失阶段 {json.dumps(missing, ensure_ascii=False)}。"
+                               f"读取 {run.as_posix()}/checks 下的实际回执和相关日志，复核原始结果。"
+                               "报告真实失败、环境阻断和未运行项目，按证据路径说明覆盖与结论。")
+        write_text(output / "prompt.txt", prompt)
+        write_json(output / "invocation.json", {"model": model, "effort": effort, "phase": phase,
+                   "provider": "codex", "sandbox": "read-only", **{key: request[key] for key in _BINDING_KEYS},
+                   "started_at": now(), "orchestrator_sha256": file_hash(Path(__file__))})
+        with lock(run / "native.lock"):
+            answer = _native_turn(config, source, output, prompt, model, effort)
+        _assert_source(request, run)
+        write_json(output / "answer.json", {**answer, **{key: request[key] for key in _BINDING_KEYS}})
+        write_text(output / "answer.md", answer["answer"])
+        if phase == "plan":
+            _status(request, run, status="preparing", stage="prepare", model=model, effort=effort,
+                    summary="Codex 已返回方案，等待隔离测试。")
+            outcome = "planned"
+        else:
+            write_text(run / "report.md", answer["answer"])
+            _status(request, run, status="failed" if missing else "completed", stage=stage,
+                    model=model, effort=effort, report_path=str(run / "report.md"), missing_stages=missing,
+                    summary=("部分阶段缺少终态回执：" + "、".join(missing) if missing else "本轮测试完成，结果以各阶段回执为准。"))
+            outcome = "incomplete" if missing else "completed"
+        print(json.dumps({"status": outcome, "session": answer["session_id"], "output": str(output),
+                          "model": model, "effort": effort}, ensure_ascii=True), flush=True)
+    except Exception as error:
+        write_json(output / "operator-error.json", {"type": type(error).__name__, "error": str(error), "at": now()})
+        _status(request, run, status="failed", stage=stage, summary="全流程执行或证据核验失败。",
+                output_dir=str(output))
+        raise
 
 
 def main():
@@ -357,7 +284,7 @@ def main():
         print(json.dumps(create(args.config), ensure_ascii=True))
     else:
         if not args.request:
-            parser.error("--request is required for a native call")
+            parser.error("--request is required")
         _, run = _request(args.request)
         with lock(run / "dispatch.lock"):
             invoke(args.config, args.request, args.phase)

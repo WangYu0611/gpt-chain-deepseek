@@ -87,7 +87,7 @@ class FullFlowChecksTests(unittest.TestCase):
         self.request["project_dir"] = str(self.project)
         self.request["effort"] = "low"
         self.save()
-        with self.assertRaisesRegex(ValueError, "Claude/high"):
+        with self.assertRaisesRegex(ValueError, "supported planning and verification model"):
             flow.load_request(self.path)
 
     def test_fable_and_historical_opus_authorizations_keep_their_canonical_hashes(self):

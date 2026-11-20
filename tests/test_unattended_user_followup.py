@@ -35,6 +35,14 @@ class UserFollowupTests(unittest.TestCase):
     def state_now(self):
         return self.engine._load()
 
+    def test_codex_only_rejects_legacy_followup_dispatch_and_queueing(self):
+        self.engine.config["codex_only"] = True
+        with self.assertRaisesRegex(ValueError, "旧原生会话追加入口已停用"):
+            self.engine.queue_user_followup(self.path)
+        with self.assertRaisesRegex(ValueError, "历史追加请求绑定旧原生会话"):
+            self.engine._followup_providers(self.state["task"])
+        self.assertFalse((self.runtime / "user-followups.json").exists())
+
     def test_fable_followup_binds_the_stored_repair_model_and_provider_clone(self):
         fixture = repair_fixtures.UserRepairTests()
         fixture.setUp()

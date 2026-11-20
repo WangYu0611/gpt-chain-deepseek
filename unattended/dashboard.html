@@ -320,13 +320,13 @@
         </section>
       </div>
     </div>
-</div><div class="view" id="view-art" hidden>      <div class="art-track" aria-label="独立美术制作流程"><a href="#art-panel">美术制作</a><span data-art-stage="queued">任务排队</span><small>→</small><span data-art-stage="code">Claude 制作</span><small>→</small><span data-art-stage="art_check">独立检查</span><small>→</small><span data-art-stage="awaiting_approval">用户视觉验收</span><small>→</small><span data-art-stage="promotion">批准资产入库</span></div>    <section class="panel panel-pad" id="art-panel" aria-labelledby="art-heading">
+</div><div class="view" id="view-art" hidden>      <div class="art-track" aria-label="独立美术制作流程"><a href="#art-panel">美术制作</a><span data-art-stage="queued">任务排队</span><small>→</small><span data-art-stage="code">美术制作</span><small>→</small><span data-art-stage="art_check">独立检查</span><small>→</small><span data-art-stage="awaiting_approval">用户视觉验收</span><small>→</small><span data-art-stage="promotion">批准资产入库</span></div>    <section class="panel panel-pad" id="art-panel" aria-labelledby="art-heading">
       <div class="panel-head"><div><h2 id="art-heading">美术队列与人工验收</h2><p class="small">独立制作与技术检查，确认当前预览后进入接入队列。</p></div><span class="tag" id="art-status">等待同步</span></div>
       <section class="art-manual-entry" id="art-manual-entry" aria-labelledby="art-manual-entry-heading" hidden><h3 id="art-manual-entry-heading">人工验收</h3><p>请查看当前版本，并填写认可范围和后续仍需调整之处。意见可说明仅作为阶段示意。</p><div id="art-manual-entry-list" class="art-manual-entry-list"></div></section>
       <div class="flow-entry"><span>按实际制作步骤查看模型、阻塞原因、日志与产物。</span><a href="#flows" data-open-view="flows">打开美术流程与证据 →</a></div>
       <div class="small" id="art-worker">正在读取独立执行器状态。</div>
       <div class="art-production" id="art-production" role="status" hidden><span>本轮实际步骤</span><strong id="art-production-label"></strong><span class="small" id="art-production-time"></span></div>
-      <section class="art-diagnosis-response" id="art-diagnosis-response" aria-labelledby="art-diagnosis-heading" hidden><h3 id="art-diagnosis-heading">Claude 需要你决定</h3><p id="art-diagnosis-reason"></p><p id="art-diagnosis-summary"></p><ul id="art-diagnosis-questions" class="art-diagnosis-questions"></ul><details><summary>查看 Claude 的计划摘要</summary><p id="art-diagnosis-plan"></p></details><p class="small">你的回复将原文交给 Claude 重新分析，不会直接批准旧方案或接受资产。</p><label for="art-diagnosis-feedback">你的决定或补充条件</label><textarea id="art-diagnosis-feedback" class="art-diagnosis-feedback" maxlength="4000" placeholder="写下你的回复，再点击发送。"></textarea><button type="button" id="art-diagnosis-send" class="art-diagnosis-submit">回复 Claude 继续处理</button><p id="art-diagnosis-message" class="art-diagnosis-message" role="status"></p></section>
+      <section class="art-diagnosis-response" id="art-diagnosis-response" aria-labelledby="art-diagnosis-heading" hidden><h3 id="art-diagnosis-heading">美术制作需要你决定</h3><p id="art-diagnosis-reason"></p><p id="art-diagnosis-summary"></p><ul id="art-diagnosis-questions" class="art-diagnosis-questions"></ul><details><summary>查看诊断计划摘要</summary><p id="art-diagnosis-plan"></p></details><p class="small">你的回复将用于新一轮诊断。</p><label for="art-diagnosis-feedback">你的决定或补充条件</label><textarea id="art-diagnosis-feedback" class="art-diagnosis-feedback" maxlength="4000" placeholder="写下你的回复，再点击发送。"></textarea><button type="button" id="art-diagnosis-send" class="art-diagnosis-submit">发送决定</button><p id="art-diagnosis-message" class="art-diagnosis-message" role="status"></p></section>
       <section class="art-reworks" id="art-rework-panel" aria-labelledby="art-rework-heading">
         <div class="panel-head"><h2 id="art-rework-heading">返工原因</h2><button type="button" id="art-rework-refresh" class="art-rework-refresh">刷新</button></div>
         <p id="art-rework-summary" class="art-rework-count">正在读取进度…</p>
@@ -785,8 +785,8 @@
     if(!item){$('full-flow-retest').hidden=true;$('full-flow-package-short').hidden=true;if(error){text('full-flow-status','记录待核实');text('full-flow-summary',error);for(const id of ['full-flow-model','full-flow-stage','full-flow-updated','full-flow-scope'])text(id,'—');$('full-flow-detail').disabled=true;}return;}
     const repairBasis=snapshot.task?.user_repair?.source_full_flow_run===item.id;
     const historical=!!(item.historical||repairBasis||item.accepted_repair);
-    $('full-flow-test').dataset.historical=String(historical);text('full-flow-title',repairBasis?'本批修复的历史测试依据':item.accepted_repair?'修复前的全流程测试':historical?'历史全流程测试':item.title||'Claude全流程测试');text('full-flow-status',item.accepted_repair?'修复前记录':item.status_label||item.status);text('full-flow-summary',item.summary||'本次测试按固定版本独立执行，主任务状态另行显示。');
-    text('full-flow-model','测试执行者 · '+(item.actor||'Claude Code')+' · '+flowModelLabel(item));text('full-flow-stage','阶段 · '+(item.stage_label||item.stage));text('full-flow-updated','更新 · '+dateTime(item.stage_updated_at||item.updated_at));
+    $('full-flow-test').dataset.historical=String(historical);text('full-flow-title',repairBasis?'本批修复的历史测试依据':item.accepted_repair?'修复前的全流程测试':historical?'历史全流程测试':item.title||'全流程测试');text('full-flow-status',item.accepted_repair?'修复前记录':item.status_label||item.status);text('full-flow-summary',item.summary||'本次测试按固定版本独立执行，主任务状态另行显示。');
+    text('full-flow-model','测试执行者 · '+(item.actor||'未记录')+' · '+flowModelLabel(item));text('full-flow-stage','阶段 · '+(item.stage_label||item.stage));text('full-flow-updated','更新 · '+dateTime(item.stage_updated_at||item.updated_at));
     text('full-flow-scope',(repairBasis?'本批修复的历史依据 · ':item.historical?'历史测试版本 · ':'固定测试版本 · ')+str(item.task_id)+' · HEAD '+shortSHA(item.head_sha)+(item.historical&&item.current_head_sha?' · 当前工作区 '+shortSHA(item.current_head_sha):'')+'。独立测试不改变主任务状态或验收结论。');
     $('full-flow-package-short').hidden=!item.package_short;if(item.package_short)text('full-flow-package-short',item.package_short.summary);
     $('full-flow-retest').hidden=!item.retest;if(item.retest)text('full-flow-retest',[item.retest.summary||'补充复测记录单独列示，首轮结果保留。',item.retest.reconciliation_summary].filter(Boolean).join(' '));
@@ -922,7 +922,7 @@
     const item=data?.art?.diagnosis_response,key=diagnosisResponseKey(item),valid=!!item&&data?.art?.phase==='BLOCKED'&&item.status==='waiting_user'&&item.can_respond===true;
     $('art-diagnosis-send').disabled=!valid||!connected||artDiagnosisPending.has(key)||artDiagnosisSubmitted.has(key);
     $('art-diagnosis-feedback').disabled=artDiagnosisPending.has(key)||artDiagnosisSubmitted.has(key)||!!item&&item.can_respond===false;
-    text('art-diagnosis-message',artDiagnosisMessages.get(key)||(!connected?'连接中断，恢复同步后可发送回复。':item?.can_respond===false?'回复已排队，等待 Claude 重新分析。':''));
+    text('art-diagnosis-message',artDiagnosisMessages.get(key)||(!connected?'连接中断，恢复同步后可发送回复。':item?.can_respond===false?'回复已排队，等待重新诊断。':''));
   }
   function renderArtDiagnosis(art){
     const item=art.diagnosis_response,key=diagnosisResponseKey(item),visible=!!item&&art.phase==='BLOCKED'&&item.status==='waiting_user';
@@ -942,7 +942,7 @@
     const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),15000);
     try{
       const response=await fetch('/api/art/diagnosis/respond',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json','X-Art-Action-Token':data?.art?.action_token||''},body:JSON.stringify({task_id:item.task_id,receipt_sha256:item.receipt_sha256,feedback})});const result=await response.json();if(!response.ok)throw new Error(result.error||'回复未提交，请刷新核对诊断版本。');
-      artDiagnosisSubmitted.add(key);artDiagnosisMessages.set(key,'回复已提交，等待 Claude 重新分析；旧方案尚未被直接批准。');toast('回复已交给 Claude 待处理');await refresh();
+      artDiagnosisSubmitted.add(key);artDiagnosisMessages.set(key,'回复已提交，等待重新诊断。');toast('美术诊断回复已提交');await refresh();
     }catch(error){artDiagnosisMessages.set(key,error.name==='AbortError'?'提交响应超时，请刷新核对是否已收到，再决定是否重发。':str(error.message));await refresh();}
     finally{clearTimeout(timeout);artDiagnosisPending.delete(key);syncArtDiagnosisActions();}
   });

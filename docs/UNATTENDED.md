@@ -50,7 +50,7 @@ Windows 临时拒绝替换断点、心跳或模型回执文件时（WinError 5/3
 
 ## 首次配置
 
-本机当前由 Claude `claude-fable-5-2` / `high` 负责规划，Codex `gpt-6.2-sol` / `high` 负责编码，OpenAI Responses API 的 `gpt-6-astra` / `high` 负责独立验收。
+本机开启 `codex_only`。Codex `gpt-6.2-sol` 负责实现，`gpt-6.2-astra` 负责常规规划、关键规划和独立核验。各职责使用独立会话。从北京时间 2026-11-22 00:00 开始，新调用从 `ultra` 切换到 `high`。配置时间使用带时区的 `codex.effort_change_at`，切换后档位使用 `codex.effort_after_change`。调度器在发起新调用时计算有效档位。
 
 设置 `coding_provider: "codex"` 可使用已登录 ChatGPT 订阅的 Codex CLI 编码。 `codex.coding_model` 和 `codex.coding_reasoning_effort` 分别控制编码模型和思考档位。调度器为每个任务建立独立的编码会话，同一任务返工时继续该任务的会话。验收的 API 密钥、模型和档位由验收配置控制。
 
@@ -94,9 +94,9 @@ API 与已授权的订阅兜底都因额度不足失败时，原生订阅限额�
 
 启用 `claude.planned_core_tests` 后，任务书会列出 1 至 5 个对应验收条件的核心测试。`core_tests` 字段仅包含完整测试名，验收条件映射和复用说明放在任务书正文。Claude Code 可以在编译成功后用调度器生成的固定命令预跑这些测试。独立检查在本地提交上运行清单中的测试，全量回归安排在里程碑验收。
 
-设置 `planning_provider: "claude"` 可将任务规划交给 Claude Code，配合 `coding_provider: "codex"` 或 `coding_provider: "claude"` 使用。规划使用独立只读会话，输出原有任务书和核心测试清单，编码使用任务自己的会话。Codex 负责逐任务独立验收与里程碑最终验收。未设置 `planning_provider` 的配置继续由 Codex 规划。
+设置 `planning_provider: "codex"` 后，规划使用独立只读会话，输出任务书和核心测试清单。开启 `codex.tiered_planning` 后，涉及关键系统的任务草案进入另一只读会话复核。验收使用独立调用。
 
-本机通过 `claude.model` 与 `claude.critical_plan_model` 为两级规划选用 `claude-fable-5-2`。日常任务直接进入开发，关键系统草案交给独立会话核对与定稿后再进入开发。关键规划包括跨系统架构、复杂依赖拆分、存档格式或迁移契约、核心规则冻结与阶段整体规划，单纯要求保留既有契约的任务按实际改动判断。阶段完成提案也交给关键规划会话核对，再进入独立检查与 Codex 阶段验收。两种规划均使用 `high` 思考档，关键规划可单独设置 `claude.critical_plan_reasoning_effort`。所选模型和草案来源写入断点及回执，重启与重试沿用已保存的选择。面板在规划期间显示实际所选模型。
+关键规划包括跨系统架构、复杂依赖拆分、存档格式或迁移契约、核心规则冻结与阶段整体规划。阶段完成提案经关键规划复核后进入独立检查和阶段核验。所选模型、思考档位及草案来源写入断点和回执。
 
 最后一次本地提交后，DSH 将请求写到已忽略的 `Saved/Automation/<任务编号>/validation-request.json`，例如：
 

@@ -250,11 +250,13 @@ def _diagnosis_operation_files(evidence, runtime, op, task, head):
     if directory.parent != runtime / "runs" or not re.fullmatch(r"art_diagnose-[a-f0-9]{32}", directory.name):
         raise ValueError("自主诊断操作目录不匹配")
     logical = directory
-    directory = _claude_directory(runtime, logical, "art_diagnose")
+    using_codex = op.get("diagnosis_provider") == "codex"
+    if not using_codex:
+        directory = _claude_directory(runtime, logical, "art_diagnose")
     receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=65536)
     if receipt and (receipt.get("kind") != "art_diagnose" or receipt.get("task_id") != task.get("id") or receipt.get("head_sha") != head):
         raise ValueError("自主诊断执行回执不属于当前任务或 HEAD")
-    _provider_files(evidence, runtime, logical, title="当前 Claude 只读诊断分支")
+    _provider_files(evidence, runtime, logical, title="当前 Codex 只读诊断" if using_codex else "当前 Claude 只读诊断分支")
     result = _diagnosis_result(_object(_confined(runtime, directory / "result.json"), missing={}, maximum=256 * 1024), head)
     if result:
         pending = task.get("art_diagnosis") or {}
@@ -741,8 +743,8 @@ def _full_flow_detail(config_path):
              "request_sha256": context["request_sha256"], "request_file_sha256": context["request_file_sha256"]}
     evidence = Evidence("development", "full_flow_test", scope)
     label = ("历史版本的隔离测试" if public["historical"] else "本次隔离全流程测试") + " · " + request["task_id"] + " · HEAD " + request["head_sha"][:12]
-    detail = {"lane": "development", "node": "full_flow_test", "title": "Opus全流程测试", "task_id": request["task_id"],
-              "scope_label": label, "summary": public["summary"] or public["stage_label"], "actor": "Claude Code",
+    detail = {"lane": "development", "node": "full_flow_test", "title": public["title"], "task_id": request["task_id"],
+              "scope_label": label, "summary": public["summary"] or public["stage_label"], "actor": public["actor"],
               "model": public["model"], "effort": public["effort"], "model_source": public["model_source"],
               "blocked_reason": public["summary"] if status["status"] == "failed" else None}
     evidence.virtual("全流程测试绑定与状态", {key: public[key] for key in
@@ -763,7 +765,8 @@ def _full_flow_detail(config_path):
     if status.get("report_path"):
         report = _confined(run, run / "report.md")
         expected = _digest(report) if report.is_file() and report.stat().st_size <= MAX_TEXT else None
-        evidence.add(run, report, "Opus全流程测试报告", mode="text", expected=expected)
+        title = "全流程测试报告" if public["actor"] == "Codex" else "Opus全流程测试报告"
+        evidence.add(run, report, title, mode="text", expected=expected)
     notices = []
     documents = []
     for stage in ("prepare", "build", "regression", "visual", "package", "retest", "package-short"):
@@ -926,8 +929,12 @@ def _collect(config_path, lane, node, snapshot=None):
                 if lane != "art" or task.get("kind") != "art":
                     raise ValueError("自主诊断不属于美术任务")
                 _diagnosis_operation_files(evidence, runtime, op, task, head)
-                detail["title"] = "Claude 自主诊断与调整"
-                detail["summary"] = "原制作会话的只读诊断分支；以下为诊断日志与调整计划，不代表制作完成或视觉验收通过。"
+                if op.get("diagnosis_provider") == "codex":
+                    detail["title"] = "Codex 自主诊断与调整"
+                    detail["summary"] = "独立只读诊断日志与调整计划。"
+                else:
+                    detail["title"] = "Claude 自主诊断与调整"
+                    detail["summary"] = "原制作会话的只读诊断分支；以下为诊断日志与调整计划，不代表制作完成或视觉验收通过。"
             elif op["kind"] in {"check", "art_check", "milestone_check"}:
                 directory = _confined(runtime, Path(op["output_dir"]))
                 if directory.parent != runtime / "runs":

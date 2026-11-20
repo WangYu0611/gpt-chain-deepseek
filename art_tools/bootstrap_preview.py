@@ -16,6 +16,9 @@ def save(path, data):
 
 
 def main():
+    original = json.loads((REPO / "unattended.local.json").read_text(encoding="utf-8-sig"))
+    if original.get("codex_only") is True:
+        raise ValueError("Use the currently configured Codex art worker")
     config_path = RUNTIME / "approved/HOUSE-COMMON-001.json"
     if config_path.exists():
         print("Existing approved batch retained:", config_path)
@@ -70,7 +73,6 @@ def main():
         "只能通过调度器给出的固定preview命令制作。不得读密钥、改私有账本或批次配置；不启动其余五级。\n"
         "读取art-brief.json，执行固定入口并检查公共交付回执。真实RHI展示和技术通过不代替用户视觉确认。\n",
         encoding="utf-8")
-    original = json.loads((REPO / "unattended.local.json").read_text(encoding="utf-8-sig"))
     claude = dict(original["claude"])
     for key in ("visual_preflight", "test_preflight", "instructions", "plan_instructions", "critical_plan_model"):
         claude.pop(key, None)

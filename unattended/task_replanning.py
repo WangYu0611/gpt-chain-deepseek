@@ -6,6 +6,7 @@ acceptance criteria, coding session, accepted baseline, or independent reviewer.
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ import re
 
 from . import gitops
 from .providers import ProviderError, claude_result_directory, read_session, validate_output
-from .config import codex_coding_settings
+from .config import codex_role_settings
 from .storage import read_json, write_json
 from .ue_checks import _safe_under
 
@@ -196,7 +197,7 @@ class TaskReplanning:
         scope["checks"] = deepcopy(effective_checks)
         coder = self.config.get("coding_provider")
         settings = self.config.get("claude", {})
-        model, effort = (codex_coding_settings(self.config) if coder == "codex" else
+        model, effort = (codex_role_settings(self.config, "code", now=datetime.min.replace(tzinfo=timezone.utc)) if coder == "codex" else
                          (settings.get("model"), settings.get("reasoning_effort")))
         result = {"head_sha": head, "review_round": round_, "scope_sha256": self._replanning_digest(scope),
                 "review_sha256": files.get(str(review_path)), "delivery_sha256": files.get(str(delivery_path)),
@@ -293,12 +294,16 @@ class TaskReplanning:
         if not policy["enabled"]:
             return False
         task = state.get("task") or {}
-        settings = self.config.get("claude", {})
         coder = self.config.get("coding_provider")
+        planner = self.config.get("planning_provider", "codex")
+        if planner == "codex":
+            model, effort = codex_role_settings(self.config, "plan", now=self.now())
+        else:
+            settings = self.config.get("claude", {})
+            model, effort = settings.get("critical_plan_model"), settings.get("critical_plan_reasoning_effort")
         if (task.get("kind") == "art" or coder not in {"claude", "codex"} or task.get("coding_provider") != coder or
-                self.config.get("planning_provider") != "claude" or not settings.get("critical_plan_model") or
-                not settings.get("critical_plan_reasoning_effort")):
-            raise ValueError("同任务重新规划需要已配置的 Claude 关键规划模型和匹配当前编码提供方的功能任务。")
+                not model or not effort):
+            raise ValueError("同任务重新规划需要已配置的规划模型和匹配当前编码提供方的功能任务。")
         history = self._epoch_replanning_history(task)
         if len(history) >= policy["max_cycles"]:
             self._block(state, source_phase, "同任务重新规划窗口已用完；原验收仍未通过。" + feedback)
@@ -315,8 +320,7 @@ class TaskReplanning:
                               "source_operation": deepcopy(source_operation),
                               "source_check_results": deepcopy(task.get("check_results") or
                                   (task.get("replanning") or {}).get("source_check_results")),
-                              "planning_model": settings["critical_plan_model"],
-                              "planning_reasoning_effort": settings["critical_plan_reasoning_effort"],
+                              "planning_model": model, "planning_reasoning_effort": effort,
                               "policy": deepcopy(policy)}
         if task.get("user_repair"):
             task["replanning"]["user_repair_epoch"] = task["user_repair"]["epoch"]
@@ -346,8 +350,6 @@ class TaskReplanning:
         if not self._task_replanning_policy(task)["enabled"]:
             self._block(state, "REPLAN", "同任务重新规划已停用；保留原断点，不调用规划模型。")
             return
-        if self.config.get("planning_provider") != "claude":
-            raise ProviderError("重新规划提供方必须保持 Claude，不能切换为审核者。")
         if pending.get("status") != "pending":
             self._block(state, "REPLAN", "重新规划已留下待处理结论；不能重复执行旧计划。")
             state["operation"] = None
@@ -391,7 +393,7 @@ class TaskReplanning:
             reason = "同任务重新规划已停用；计划保留，未授予执行窗口。"
         elif result["action"] != "task":
             reason = ("规划完成不能代替原任务验收；保留原候选待处理。" if result["action"] == "complete"
-                      else "Claude规划报告外部阻塞：" + result["reason"])
+                      else "规划报告外部阻塞：" + result["reason"])
         elif len(self._epoch_replanning_history(task)) >= min(policy["max_cycles"], pending["policy"]["max_cycles"]):
             reason = "同任务重新规划周期已达到策略上限。"
         plan_hash = self._replanning_digest(result["body"].strip())

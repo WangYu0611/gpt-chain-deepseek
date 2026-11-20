@@ -59,7 +59,7 @@ def parser():
     defer = commands.add_parser("defer", help="按明确指示将当前验收阻塞项记为待人工确认，继续其他开发")
     _config_argument(defer)
     defer.add_argument("--reason", required=True, help="延期原因及用户确认范围，不将延期记为验收通过")
-    repair = commands.add_parser("repair", help="按显式用户授权为当前同任务启用 Opus 修复和固定全流程验收")
+    repair = commands.add_parser("repair", help="旧版本专项修复入口，仅用于兼容已有非 Codex 专用配置")
     _config_argument(repair)
     repair.add_argument("--request", type=Path, required=True)
     dashboard = commands.add_parser("dashboard", help="打开自动刷新的本地运行面板")

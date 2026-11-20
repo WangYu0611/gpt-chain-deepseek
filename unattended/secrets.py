@@ -64,6 +64,13 @@ def read_secret(name: str, *, config_path: str | Path | None = None,
     return _validate_secret(settings.get(name, ""), name)
 
 
+def read_secret_list(name: str, *, config_path=None, secrets_file=None) -> list[str]:
+    values = _secret_settings(config_path=config_path, secrets_file=secrets_file).get(name, [])
+    if not isinstance(values, list) or len(values) > 16:
+        raise ValueError(f"本地密钥文件中的 {name} 应为最多 16 项的列表。")
+    return [key for value in values if (key := _validate_secret(value, name))]
+
+
 def secret_values(config_path=None, secrets_file=None) -> list[str]:
     """Collect central credential values for output redaction, including archived keys."""
     pending = [_secret_settings(config_path=config_path, secrets_file=secrets_file)]

@@ -21,11 +21,13 @@ class ProcessTests(unittest.TestCase):
                            environment=safe_environment(), **kwargs)
 
     def test_environment_never_inherits_publisher_keys(self):
-        env = safe_environment({"PATH": "example", "GITHUB_TOKEN": "secret", "GH_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "secret"})
+        env = safe_environment({"PATH": "example", "SystemDrive": "C:", "GITHUB_TOKEN": "secret",
+                                "GH_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "secret"})
         self.assertNotIn("GITHUB_TOKEN", env)
         self.assertNotIn("GH_TOKEN", env)
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
         self.assertEqual(env["PATH"], "example")
+        self.assertEqual(env["SystemDrive"], "C:")
         with self.assertRaises(ValueError):
             safe_environment(extra={"GITHUB_TOKEN": "secret"})
 

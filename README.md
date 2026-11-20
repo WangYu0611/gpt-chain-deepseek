@@ -19,9 +19,9 @@ Windows 后台运行使用 `unattended.cmd background start`；`background insta
 
 面板分为总览、功能开发、美术工作室、验收记录和运行设置。总览显示当前开发任务与待验收美术预览；[美术工作室](http://127.0.0.1:8765/#art) 提供大图及视角切换、本批累计费用、技术检查摘要和版本验收。自动刷新保留当前页面与同版本的验收草稿，新版本需要重新填写意见；费用未核实或未结清时可退回修改，暂不能接受。后续未授权预算的批次仅显示计划。
 
-独立美术执行器可配置 `art_autonomy: {"enabled": true, "max_cycles": 3, "rework_window": 3}`。常规返工到阈值后，系统自动让真实 Claude Opus 5.5/high 在原制作会话的只读分支独立诊断、提出调整计划，不预设美术解法。在已确认风格、预算、批次、工具与验收权限内，计划原样交回原制作会话执行；需要改变授权或持续无进展时保留原因与证据。自动窗口单独计数，不冒记人工批准。作品仍须独立技术审核及用户视觉接受后才能入库，功能开发不使用这项策略。
+独立美术执行器可配置 `art_autonomy: {"enabled": true, "max_cycles": 3, "rework_window": 3}`。常规返工到阈值后，Codex 规划模型独立复核证据并提出调整计划。制作模型在已确认的批次范围内编辑配方与脚本，由控制器运行预算受限的固定预览入口。需要改变授权或持续无进展时，系统保留原因与证据。作品仍须通过独立技术核验及用户视觉验收才能入库。
 
-功能开发可单独配置 `task_replanning: {"enabled": true, "max_cycles": 3, "rework_window": 3}`。连续返工到阈值后进入 REPLAN，由配置的 Claude 关键规划模型重新分析当前任务；新计划交回原编码会话执行，不替换原任务、验收条件或核心测试，也不提前接受提交。已有 REVIEW 阻塞可使用 `unattended.cmd retry --replan` 恢复到这一路径。持续无进展和确需外部条件的任务保留证据并停止，不无限扩展返工次数。
+功能开发可单独配置 `task_replanning: {"enabled": true, "max_cycles": 3, "rework_window": 3}`。连续返工到阈值后进入 REPLAN，由 Astra 在独立会话分析当前任务，再把执行指导交给原编码会话。原任务、验收条件和核心测试仍绑定当前候选。已有 REVIEW 阻塞可使用 `unattended.cmd retry --replan` 恢复到这一路径。达到返工上限或确需外部条件时，调度器保留证据并停止。
 
 编码可用 `code_timeout_seconds` 单独设置有限总预算，未配置时沿用 `step_timeout_seconds`。启用同任务重规划后，真实 CODE 预算中断会保存原生回执、原会话和未提交代码指纹，再交给关键规划；它不代表代码验证失败或本轮交付完成。旧版本遗留的同类阻塞也会依据真实回执恢复。普通错误、暂停、证据不符及重复无进展继续保留原门禁。新调用只展示当前状态，旧超时保留为历史记录。
 
@@ -45,26 +45,20 @@ if (!(Test-Path secrets.local.json)) { Copy-Item secrets.example.json secrets.lo
 
 | 字段 | 使用场景 |
 | --- | --- |
-| `CODEX_API_KEY` | `codex.auth_mode` 设为 `api_key` 时用于派工与验收。 |
-| `CODEX_API_KEY_BACKUPS` | 保存其余 GPT 密钥的数组。需要更换主密钥时，将选中的值填入 `CODEX_API_KEY`。 |
+| `CODEX_API_KEY` | Responses API 核验优先使用的主密钥。 |
+| `CODEX_API_KEY_BACKUPS` | Responses API 核验使用的有序备用密钥。主密钥遇到额度、授权或模型权限问题时依次尝试。 |
 | `CODEX_BASE_URL` | 可选 OpenAI Responses API 地址，留空使用官方服务。 |
-| `ANTHROPIC_API_KEY` | `claude.auth_mode` 设为 `api_key` 时用于 Claude 规划、编码、美术诊断及全流程测试。 |
-| `ANTHROPIC_BASE_URL` | 可选 Claude API 地址，留空使用官方服务。 |
 | `DEEPSEEK_API_KEY` | 使用 DeepSeek API 的 dsh 配置。 |
 | `TRIPO_API_KEY` | 在美术批次的 `key_file` 中填入 `secrets.local.json` 的绝对路径，该文件须位于目标项目目录之外。 |
 | `FEISHU_WEBHOOK_URL` | 启用本地飞书通知且通知设置未填写 `webhook_url` 时使用。默认在 `.unattended/feishu.local.json` 中设置启用状态、事件与面板地址。 |
 
-Codex 和 Claude API 模式优先读取共享文件，缺少密钥时查找进程环境中的同名变量。DeepSeek 也支持 `DEEPSEEK_API_KEY` 环境变量。Codex 可配置 `subscription_fallback: true`，API 余额耗尽或服务明确返回赠送额度禁止用于 Codex 时，使用已登录的订阅。Claude 的 `auth_mode` 默认是 `subscription`，使用 API 时改为 `api_key`。GitHub 推送使用 Git 已配置的凭据。
-
-Claude 可配置 `subscription_fallback: true`。官方 API 明确返回余额不足时，Claude Code 使用本机已登录的订阅继续，编码任务接续原会话与工作区；规划和只读诊断重新执行对应步骤。模型、思考档位和工具权限按本次任务的配置执行。
-
-在 `claude` 配置下设置 `"subscription_coding": {"model": "claude-opus-5-5", "reasoning_effort": "high"}`，为订阅模式下的常规开发编码指定模型。常规规划使用 `claude.model`，关键规划使用 `claude.critical_plan_model`。
+项目启用 `codex_only`。开发使用 `gpt-6.2-sol`，规划和核验使用 `gpt-6.2-astra`。Codex CLI 使用已登录的 ChatGPT 订阅，GitHub 推送使用 Git 已配置的凭据。北京时间 2026-11-22 00:00 起，所有新调用改用 `high`，独立核验通过 `review_transport_after_effort_change` 切到 Responses API。
 
 任务、阶段与美术审核支持直接调用 OpenAI Responses API。在 `codex` 配置中设置 `"review_transport": "responses_api"`，并配置 `model`、`reasoning_effort` 和共享密钥文件。审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 响应与工具记录保存在对应运行目录，重启时验证回执后恢复。该模式通过 `CODEX_API_KEY` 调用普通 API，API 错误会记录并按类型重试。
 
 短暂连接中断会在当前请求内有限重试。需要重新启动审核时，系统校验原请求、固定提交与已读取证据，将完成的审核轮次复制到新运行目录后续接。面板显示已完成轮数、续接轮数和最近回执时间。
 
-Claude API 配置使用 `claude-fable-5-2` 与 `high`。主程序和独立美术 worker 可通过 `network_file` 指向同一个 `network.local.json`，结构见 `network.example.json`。网络配置包含固定代理地址 `proxy_url` 和出口地区 `region`，本项目使用 `SG`。OpenAI、Claude、DSH、飞书、Tripo API 与下载均应用该代理，Git 发布也使用同一配置。配置为必需文件时，文件缺失或代理不可达会报告失败。Clash 专用监听器固定使用新加坡节点，切换订阅后需要重新配置并验证出口。
+主程序和独立美术 worker 通过 `network_file` 共用 `network.local.json`，结构见 `network.example.json`。OpenAI、飞书、Tripo API、下载和 Git 发布通过专用代理，出口为 `SG`。文件缺失或代理不可达时报告失败。切换 Clash 订阅后重新配置监听器并验证出口。
 
 ## 历史入口：GitHub × DSH 配置
 

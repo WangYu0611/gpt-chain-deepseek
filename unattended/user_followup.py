@@ -145,6 +145,8 @@ def completed_followup_evidence(task, runtime):
 class UserFollowup:
     def queue_user_followup(self, request_path):
         """Queue independently of the long-running controller lock; never edit state."""
+        if self.config.get("codex_only") is True:
+            raise ValueError("旧原生会话追加入口已停用。请在当前 Codex 编码任务中提交追加范围。")
         request_path = Path(request_path).absolute()
         with lock(_under(self.runtime / "user-followups.lock", self.runtime)):
             request = load_followup_request(request_path, self.runtime)
@@ -273,6 +275,8 @@ class UserFollowup:
             rows = [row for row in _queue(self.runtime)["requests"] if row.get("task_id") == task["id"] and row.get("status") in {"queued", "active"}]
         if not rows:
             return False
+        if self.config.get("codex_only") is True:
+            raise ValueError("该历史追加请求绑定旧原生会话。请在当前 Codex 编码任务中继续。")
         if len(rows) != 1 or state.get("operation") is not None:
             raise ValueError("Follow-up cannot interrupt an independent check or another request")
         row = rows[0]
@@ -343,6 +347,8 @@ class UserFollowup:
             "output_dir": op["output_dir"], "started_at": op["started_at"]})
 
     def _followup_providers(self, task):
+        if self.config.get("codex_only") is True:
+            raise ValueError("该历史追加请求绑定旧原生会话。请在当前 Codex 编码任务中继续。")
         profile = validate_followup_profile(task, self.runtime)
         repair = self._active_repair_profile(task)
         if self._providers_injected:

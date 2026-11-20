@@ -22,6 +22,8 @@ def git(path, *args):
     return subprocess.run(['git', '-C', str(path), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 def main():
+    if read(MAIN).get("codex_only") is True:
+        raise ValueError("Use the currently configured Codex art worker")
     if WORKER_CONFIG.exists():
         worker = read(WORKER_CONFIG)
         worker['claude'].pop('critical_plan_reasoning_effort', None)

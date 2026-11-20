@@ -172,7 +172,7 @@ def _terminate(process: subprocess.Popen[bytes], job: _WindowsJob | None):
 def safe_environment(source: Mapping[str, str] | None = None, *, extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """Do not hand the model runner the publisher's GitHub/AWS/other credentials."""
     source = os.environ if source is None else source
-    allowed = {"SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "TEMP", "TMP",
+    allowed = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "TEMP", "TMP",
                "USERPROFILE", "HOME", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
                "PROGRAMDATA", "ALLUSERSPROFILE", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE"}
     environment = {k: v for k, v in source.items() if k.upper() in allowed}

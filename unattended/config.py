@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import shutil
@@ -31,9 +32,39 @@ def claude_coding_settings(config: dict) -> dict:
     return settings
 
 
-def codex_coding_settings(config: dict) -> tuple[str, str]:
+def _codex_effort_changed(settings: dict, now) -> bool:
+    return "effort_change_at" in settings and (
+        now or datetime.now(timezone.utc)) >= datetime.fromisoformat(settings["effort_change_at"])
+
+
+def codex_role_settings(config: dict, role: str, *, now=None) -> tuple[str | None, str | None]:
     settings = config.get("codex", {})
-    return settings.get("coding_model", "gpt-6.2-sol"), settings.get("coding_reasoning_effort", "high")
+    model, effort = settings.get("model"), settings.get("reasoning_effort")
+    if role == "code":
+        model, effort = settings.get("coding_model", "gpt-6.2-sol"), settings.get("coding_reasoning_effort", "high")
+    elif role == "plan":
+        model = settings.get("plan_model", model)
+        effort = settings.get("plan_reasoning_effort", effort)
+    if _codex_effort_changed(settings, now):
+        effort = settings["effort_after_change"]
+    return model, effort
+
+
+def codex_review_transport(config: dict, *, now=None) -> str:
+    settings = config.get("codex", {})
+    transport = settings.get("review_transport", "codex")
+    return settings.get("review_transport_after_effort_change", transport) if _codex_effort_changed(settings, now) else transport
+
+
+def codex_coding_settings(config: dict) -> tuple[str, str]:
+    return codex_role_settings(config, "code")
+
+
+def planned_core_tests(config: dict) -> bool:
+    if config.get("coding_provider") == "codex" and "planned_core_tests" in config.get("codex", {}):
+        return config["codex"]["planned_core_tests"] is True
+    return (config.get("coding_provider") in {"claude", "codex"} and
+            config.get("claude", {}).get("planned_core_tests") is True)
 
 
 def validate_model_settings(settings: dict, role: str) -> None:
@@ -276,6 +307,8 @@ def load_config(path: Path) -> dict:
     planner = config.setdefault("planning_provider", "codex")
     if planner not in ("codex", "claude"):
         raise ValueError("planning_provider 必须为 codex 或 claude。")
+    if type(config.get("codex_only", False)) is not bool or (config.get("codex_only") and (planner != "codex" or coder != "codex")):
+        raise ValueError("codex_only 必须为布尔值，启用时规划和编码均须为 codex。")
     for key in dict.fromkeys(("codex", planner, coder)):
         if not isinstance(config.get(key), dict):
             raise ValueError(f"缺少 {key} 配置。")
@@ -296,15 +329,41 @@ def load_config(path: Path) -> dict:
             config[key]["patches"] = [_path(x, path.parent) for x in config[key]["patches"]]
     if config["codex"].get("sandbox", "read-only") != "read-only":
         raise ValueError("Codex 规划和验收必须使用 read-only。")
-    coding_model, coding_effort = codex_coding_settings(config)
+    codex = config["codex"]
+    validate_model_settings({key: codex[f"plan_{key}"] for key in ("model", "reasoning_effort") if f"plan_{key}" in codex}, "codex")
+    if ("effort_change_at" in codex) != ("effort_after_change" in codex):
+        raise ValueError("codex.effort_change_at 和 effort_after_change 必须同时配置。")
+    if "effort_change_at" in codex:
+        try:
+            change = datetime.fromisoformat(codex["effort_change_at"])
+            if change.utcoffset() is None:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("codex.effort_change_at 需要包含时区的 ISO 8601 时间。") from None
+        validate_model_settings({"reasoning_effort": codex["effort_after_change"]}, "codex")
+    coding_model = codex.get("coding_model", "gpt-6.2-sol")
+    coding_effort = codex.get("coding_reasoning_effort", "high")
     validate_model_settings({"model": coding_model, "reasoning_effort": coding_effort}, "codex")
+    if type(codex.get("planned_core_tests", False)) is not bool:
+        raise ValueError("codex.planned_core_tests 必须为布尔值。")
+    if type(codex.get("tiered_planning", False)) is not bool:
+        raise ValueError("codex.tiered_planning 必须为布尔值。")
+    if codex.get("planned_core_tests") and not {"ue-editor-build", "ue-task-validation"} <= {check["id"] for check in config["checks"]}:
+        raise ValueError("任务书核心测试需要独立 UE 编译与验证。")
     review_transport = config["codex"].get("review_transport", "codex")
     if review_transport not in ("codex", "responses_api"):
         raise ValueError("codex.review_transport 必须为 codex 或 responses_api。")
-    if review_transport == "responses_api" and not config["codex"].get("model"):
+    review_after_change = codex.get("review_transport_after_effort_change", review_transport)
+    if review_after_change not in ("codex", "responses_api") or (
+            "review_transport_after_effort_change" in codex and "effort_change_at" not in codex):
+        raise ValueError("codex.review_transport_after_effort_change 需要有效的审核入口和切档时间。")
+    if "responses_api" in (review_transport, review_after_change) and not config["codex"].get("model"):
         raise ValueError("Responses API 验收需要显式配置 codex.model。")
-    if config["codex"].get("auth_mode", "inherit") not in ("inherit", "api_key"):
-        raise ValueError("codex.auth_mode 必须为 inherit 或 api_key。")
+    if config["codex"].get("auth_mode", "inherit") not in ("inherit", "api_key", "chatgpt"):
+        raise ValueError("codex.auth_mode 必须为 inherit、api_key 或 chatgpt。")
+    for role in ("plan", "review"):
+        if codex.get(f"{role}_auth_mode", "inherit") not in {"inherit", "api_key", "chatgpt"}:
+            raise ValueError(f"codex.{role}_auth_mode 必须为 inherit、api_key 或 chatgpt。")
     subscription_fallback = config["codex"].get("subscription_fallback", False)
     if type(subscription_fallback) is not bool or (subscription_fallback and config["codex"].get("auth_mode") != "api_key"):
         raise ValueError("codex.subscription_fallback 必须为布尔值，且仅可在 auth_mode 为 api_key 时启用。")
@@ -347,26 +406,27 @@ def load_config(path: Path) -> dict:
             raise ValueError("任务书核心测试需要 UE 编译预检与独立验证。")
     if coder == "dsh" and config["dsh"].get("permission_mode", "workspace-write") not in {"workspace-write", "danger-full-access"}:
         raise ValueError("DSH permission_mode 应为 workspace-write 或 danger-full-access。")
+    art_coder = coder in {"codex", "claude"}
     if "art_pipeline" in config:
-        if coder != "claude":
-            raise ValueError("art_pipeline 任务执行入口需要 coding_provider 为 claude。")
+        if not art_coder:
+            raise ValueError("art_pipeline 任务执行入口需要 coding_provider 为 codex 或 claude。")
         config["art_pipeline"] = validate_art_pipeline_settings(config["art_pipeline"], project=project, runtime=runtime)
     if "art_worker" in config:
         config["art_worker"] = validate_art_worker_settings(config["art_worker"], project=project, runtime=runtime)
     if "art_promotion" in config:
-        if "art_pipeline" not in config or coder != "claude" or "art_worker" in config:
+        if "art_pipeline" not in config or not art_coder or "art_worker" in config:
             raise ValueError("art_promotion 只能配置在独立美术 worker 中。")
         config["art_promotion"] = validate_art_promotion_settings(config["art_promotion"], project=project, runtime=runtime)
     if "art_autonomy" in config:
-        if "art_pipeline" not in config or coder != "claude" or "art_worker" in config:
-            raise ValueError("art_autonomy 只能配置在独立 Claude 美术执行器中。")
+        if "art_pipeline" not in config or not art_coder or "art_worker" in config:
+            raise ValueError("art_autonomy 只能配置在独立美术执行器中。")
         config["art_autonomy"] = validate_art_autonomy_settings(config["art_autonomy"])
     if "task_replanning" in config:
         config["task_replanning"] = validate_task_replanning_settings(config["task_replanning"])
-        if config["task_replanning"]["enabled"] and (
-                planner != "claude" or coder not in {"claude", "codex"} or "art_pipeline" in config or
-                not config.get("claude", {}).get("critical_plan_model") or
-                not config.get("claude", {}).get("critical_plan_reasoning_effort")):
+        legacy_replanning = (planner == "claude" and coder in {"claude", "codex"} and
+                             config["claude"].get("critical_plan_model") and config["claude"].get("critical_plan_reasoning_effort"))
+        codex_replanning = planner == coder == "codex" and all(codex_role_settings(config, "plan"))
+        if config["task_replanning"]["enabled"] and ("art_pipeline" in config or not (legacy_replanning or codex_replanning)):
             raise ValueError("task_replanning 需要主功能 Claude 规划、Claude 或 Codex 编码，以及明确的 critical_plan_model 和 critical_plan_reasoning_effort。")
     return config
 
@@ -409,14 +469,14 @@ def doctor(config: dict) -> dict:
     except (RuntimeError, OSError) as error:
         checks["project_error"] = str(error)
     # Import locally: provider validation imports this module's model settings.
-    from .providers import ProviderError, _claude_environment, _codex_api_key, _codex_command
+    from .providers import ProviderError, _claude_environment, _codex_api_key, _codex_api_keys, _codex_command
     try:
         command = _codex_command(config["codex"].get("command"))
         checks["codex_available"] = bool(shutil.which(command[0]) or Path(command[0]).is_file())
     except (ProviderError, OSError, ValueError):
         # Doctor is an inventory, including during an incomplete desktop update.
         checks["codex_available"] = False
-    direct_review = config["codex"].get("review_transport", "codex") == "responses_api"
+    direct_review = codex_review_transport(config) == "responses_api"
     coder = config.get("coding_provider", "dsh")
     codex_cli_required = not direct_review or config.get("planning_provider", "codex") == "codex" or coder == "codex"
     checks["codex_cli_required"] = codex_cli_required
@@ -425,7 +485,8 @@ def doctor(config: dict) -> dict:
     codex_auth_ready = True
     if api_mode:
         try:
-            codex_auth_ready = bool(_codex_api_key(config.get("config_path"), secrets_file=config.get("secrets_file")))
+            keys = _codex_api_keys if direct_review else _codex_api_key
+            codex_auth_ready = bool(keys(config.get("config_path"), secrets_file=config.get("secrets_file")))
         except ValueError:
             codex_auth_ready = False
     if api_mode:

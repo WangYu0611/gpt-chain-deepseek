@@ -175,6 +175,8 @@ class UserRepair:
 
     def _user_repair_providers(self, task):
         profile = self._active_repair_profile(task)
+        if profile is not None and self.config.get("codex_only") is True:
+            raise ValueError("该历史专项修复绑定旧原生会话。请在当前 Codex 编码任务中继续。")
         if profile is None or self._providers_injected:
             return self.providers
         from .providers import AgentProviders
@@ -228,6 +230,8 @@ class UserRepair:
         return True
 
     def activate_user_repair(self, request_path):
+        if self.config.get("codex_only") is True:
+            raise ValueError("旧原生专项修复入口已停用。请在当前 Codex 编码任务中提交修复范围。")
         with self._locks():
             state = self._load()
             task = state.get("task") or {}

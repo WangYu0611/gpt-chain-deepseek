@@ -14,7 +14,8 @@ import uuid
 
 from github_harness_lab.lab_harness.process import run_process, safe_environment
 from .calendar import WorkCalendar
-from .config import ART_CODING_MODEL, claude_coding_settings, claude_execution_model, codex_coding_settings
+from .config import (ART_CODING_MODEL, claude_coding_settings, claude_execution_model, codex_coding_settings,
+                     codex_review_transport, codex_role_settings, planned_core_tests)
 from . import gitops
 from .providers import (AgentProviders, ProviderError, _responses_api_receipt, codex_result_directory,
                         read_session, validate_output)
@@ -133,10 +134,14 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         if not all(isinstance(value, str) and value.strip() for value in (task_id, title, body)):
             raise ValueError("美术任务编号、标题和任务书不能为空。")
         config_file = Path(settings["config_file"])
+        if self.config.get("coding_provider") == "codex":
+            model, effort = codex_role_settings(self.config, "code", now=self.now())
+        else:
+            model, effort = claude_execution_model(self.config), "high"
         request = {"id": task_id, "kind": "art", "title": title.strip(), "body": body.strip(),
                    "config_file": str(config_file), "config_sha256": hashlib.sha256(config_file.read_bytes()).hexdigest(),
-                   "artifacts_dir": settings["artifacts_dir"], "model": claude_execution_model(self.config),
-                   "reasoning_effort": "high", "status": "queued", "enqueued_at": self.now().isoformat()}
+                   "artifacts_dir": settings["artifacts_dir"], "model": model,
+                   "reasoning_effort": effort, "status": "queued", "enqueued_at": self.now().isoformat()}
         with lock(self.runtime / "art-queue.lock"):
             queue = self.art_queue()
             previous = next((item for item in queue["requests"] if item["id"] == task_id), None)
@@ -225,13 +230,15 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                                 "acceptance_criteria": ["独立资产检查通过", "Codex 技术审阅通过", "用户确认固定版本的美术验收包"],
                                 "reworks": 0, "session_id": None, "feedback": "", "code_resume": False, "check_results": []}
             if selected is not None:
+                if self.config.get("coding_provider") == "codex":
+                    self._select_codex_art_coder(selected)
                 current = gitops.head(work)
                 selected.update(base_sha=current, code_base=current, candidate={"head_sha": current})
                 self._validate_art_task(selected, work)
                 directory = self.runtime / "tasks" / selected["id"]
                 write_json(directory / "task.json", selected)
                 write_text(directory / "TASK.md", selected["id"] + " " + selected["title"] + "\n\n" + selected["body"] +
-                           f"\n\n执行：{selected['coding_model']} / high。资产生产不得更改主项目源码或提交。\n")
+                           f"\n\n执行：{selected['coding_model']} / {selected['coding_reasoning_effort']}。资产生产不得更改主项目源码或提交。\n")
                 state.update(task=selected, phase="CODE", operation=None, failures=0, last_error=None)
                 entry = next(entry for entry in queue["requests"] if entry["id"] == selected["id"])
                 entry.update(status="active", dispatched_at=self.now().isoformat())
@@ -619,6 +626,16 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         return {"PLAN": "plan", "REPLAN": "plan", "CODE": "code", "REVIEW": "review", "MILESTONE_REVIEW": "review",
                 "ART_REVIEW": "review", "ART_DIAGNOSE": "art_diagnose"}.get(phase)
 
+    def _uses_codex(self, phase, operation):
+        op = operation or {}
+        if phase in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"}:
+            return True
+        if phase in {"PLAN", "REPLAN"}:
+            return op.get("planning_provider", self.config.get("planning_provider", "codex")) == "codex"
+        if phase == "CODE":
+            return op.get("coding_provider", self.config.get("coding_provider")) == "codex"
+        return phase == "ART_DIAGNOSE" and op.get("diagnosis_provider") == "codex"
+
     def _validate_provider_retry(self, state, work):
         retry = state.get("provider_retry")
         if retry is None:
@@ -639,9 +656,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError("Provider retry checkpoint has an invalid deadline.") from error
         op = state.get("operation")
-        if retry["reason"] == "codex_subscription_limit" and not (
-                phase in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"} or
-                phase == "PLAN" and (op or {}).get("planning_provider", self.config.get("planning_provider", "codex")) == "codex"):
+        if retry["reason"] == "codex_subscription_limit" and not self._uses_codex(phase, op):
             raise RuntimeError("Codex quota wait requires a Codex operation.")
         if op is None:
             if retry["status"] != "retrying" or retry.get("operation_output_dir") is not None:
@@ -680,8 +695,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             # ceiling would spend calls before either quota has recovered.
             delay = requested if type(requested) is int and 0 < requested <= 8 * 86400 else 1800
         elif reason == "codex_subscription_limit":
-            if not (phase in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"} or
-                    phase == "PLAN" and op.get("planning_provider", self.config.get("planning_provider", "codex")) == "codex"):
+            if not self._uses_codex(phase, op):
                 raise RuntimeError("Codex quota wait requires a Codex operation.")
             # The API-first route can recover before the subscription reset
             # after a user replenishes API credits. Recheck at most hourly.
@@ -769,14 +783,14 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         coder = self.config.get("coding_provider", "dsh")
         if kind == "code" and coder in {"claude", "codex"}:
             if coder == "codex":
-                model, effort = codex_coding_settings(self.config)
+                model, effort = codex_role_settings(self.config, "code", now=self.now())
             else:
                 settings = claude_coding_settings(self.config)
                 model, effort = settings.get("model"), settings.get("reasoning_effort")
             op.update(coding_provider=coder, coding_model=model, coding_reasoning_effort=effort,
                       code_base=(state.get("task") or {}).get("code_base"),
                       requested_session_id=(state.get("task") or {}).get("session_id"))
-        if kind == "code" and (state.get("task") or {}).get("kind") == "art":
+        if kind == "code" and coder != "codex" and (state.get("task") or {}).get("kind") == "art":
             op.update(coding_provider="claude", coding_model=state["task"]["coding_model"],
                       coding_reasoning_effort=state["task"]["coding_reasoning_effort"])
         elif kind == "code" and (state.get("task") or {}).get("user_repair"):
@@ -785,8 +799,11 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                       user_repair_id=profile["id"], user_repair_request_sha256=profile["request_sha256"])
         self._followup_operation(state, op)
         if kind == "art_diagnose":
-            op.update(diagnosis_provider="claude", diagnosis_model=state["task"]["coding_model"],
-                      diagnosis_reasoning_effort=state["task"]["coding_reasoning_effort"])
+            if coder == "codex":
+                model, effort = codex_role_settings(self.config, "plan", now=self.now())
+            else:
+                model, effort = state["task"]["coding_model"], state["task"]["coding_reasoning_effort"]
+            op.update(diagnosis_provider=coder, diagnosis_model=model, diagnosis_reasoning_effort=effort)
         if kind == "plan":
             op["planning_provider"] = self.config.get("planning_provider", "codex")
             selection = ((state.get("task") or {}).get("replanning") if state["phase"] == "REPLAN"
@@ -794,8 +811,16 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             if selection:
                 op.update({key: selection[key] for key in
                            ("planning_model", "planning_reasoning_effort", "planning_level") if key in selection})
+            if self.config.get("codex_only"):
+                model, effort = codex_role_settings(self.config, "plan", now=self.now())
+                op.update(planning_model=model, planning_reasoning_effort=effort)
+                if selection and state["phase"] == "REPLAN":
+                    selection.update(planning_model=model, planning_reasoning_effort=effort)
             if state["phase"] == "REPLAN":
                 op.update(planning_level="critical", replanning_fingerprint=self._replanning_digest(selection["fingerprint"]))
+        if kind == "review" and self.config.get("codex_only"):
+            model, effort = codex_role_settings(self.config, "review", now=self.now())
+            op.update(review_model=model, review_reasoning_effort=effort)
         if state.get("last_error"):
             state.setdefault("operation_error_history", []).append({"error": state["last_error"],
                 "failures": state.get("failures", 0), "cleared_at": self.now().isoformat(),
@@ -843,7 +868,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
 
     def _review_resume_source(self, state, operation, work):
         from .ue_checks import _safe_under
-        if (self.config.get("codex", {}).get("review_transport") != "responses_api" or
+        if (codex_review_transport(self.config, now=self.now()) != "responses_api" or
                 state["phase"] not in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"} or
                 operation.get("kind") != "review" or
                 operation.get("task_id") != (state.get("task") or {}).get("id")):
@@ -854,6 +879,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 raise RuntimeError("API review continuation cannot reference its own operation.")
             candidates.append(operation["resume_from"])
         runtime = self.runtime.resolve()
+        model, effort = codex_role_settings(self.config, "review", now=self.now())
         for raw in candidates:
             if not isinstance(raw, str) or not Path(raw).is_absolute():
                 raise RuntimeError("API review continuation source must be an absolute managed run.")
@@ -867,6 +893,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                     and record.get("transient") is True and record.get("output_limit_exceeded") is False
                     and record.get("head_sha") == operation["head_sha"]
                     and record.get("workspace") == str(Path(work).resolve())
+                    and (not self.config.get("codex_only") or
+                         (record.get("model"), record.get("reasoning_effort")) == (model, effort))
                     and type(record.get("turns")) is list and record["turns"]):
                 return source
         return None
@@ -932,10 +960,11 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         if kind == "art_diagnose":
             return providers.art_diagnose(prompt, work, Path(op["output_dir"]), timeout,
                                           session_id=state["task"].get("session_id"))
-        if kind == "plan" and op.get("planning_model"):
+        if kind == "plan" and op.get("planning_model") and (
+                op.get("planning_provider") == "claude" or self.config.get("codex_only")):
             return providers.plan(prompt, work, Path(op["output_dir"]), timeout,
                                        model=op["planning_model"], reasoning_effort=op["planning_reasoning_effort"],
-                                       tiered=state["phase"] != "REPLAN")
+                                       tiered=state["phase"] != "REPLAN" and bool(state.get("planning_selection")))
         return getattr(providers, kind)(prompt, work, Path(op["output_dir"]), timeout)
 
     def _base_prompt(self):
@@ -957,6 +986,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             prompt += "用户当前分工：Codex 只发布任务书与独立验收，Claude Code（CC）负责编码和本地提交。\n"
         elif coder == "codex":
             prompt += "Codex 在独立会话中分别负责规划、编码与本地提交、独立验收。\n"
+        if self.config.get("codex_only"):
+            prompt += "按用户最新分工，Codex 承担项目所有模型职责。旧文档中的执行方分工以当前约定为准。\n"
         if coder == "claude":
             prompt += "历史任务书、反馈和文档中的 DSH 开发职责由 CC 接续。\n"
         elif coder == "codex":
@@ -980,23 +1011,30 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         task_id = f"{self.config['task_prefix']}-{state['sequence']:04d}"
         selection = state.get("planning_selection")
         claude = self.config.get("claude", {})
-        tiered = self.config.get("planning_provider", "codex") == "claude" and bool(claude.get("critical_plan_model"))
+        planner_provider = self.config.get("planning_provider", "codex")
+        if planner_provider == "claude":
+            tiered = bool(claude.get("critical_plan_model"))
+            model, effort = claude.get("model"), claude.get("reasoning_effort", "high")
+            critical_model = claude.get("critical_plan_model")
+            critical_effort = claude.get("critical_plan_reasoning_effort", effort)
+        else:
+            tiered = self.config.get("codex", {}).get("tiered_planning") is True and self.config.get("codex_only")
+            model, effort = codex_role_settings(self.config, "plan", now=self.now())
+            critical_model, critical_effort = model, effort
         if selection is None and tiered:
             selection = {
-                "head_sha": current, "planning_model": claude["model"],
-                "planning_reasoning_effort": claude.get("reasoning_effort", "high"), "planning_level": "routine",
-                "critical_plan_model": claude["critical_plan_model"],
-                "critical_plan_reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort", "high")),
+                "head_sha": current, "planning_model": model, "planning_reasoning_effort": effort,
+                "planning_level": "routine", "critical_plan_model": critical_model,
+                "critical_plan_reasoning_effort": critical_effort,
             }
             state["planning_selection"] = selection
             self._save(state)
         if selection is not None and (
                 not isinstance(selection, dict) or selection.get("head_sha") != current or
                 selection.get("planning_level") not in {"routine", "critical"} or
-                self.config.get("planning_provider", "codex") != "claude"):
+                (planner_provider != "claude" and not tiered)):
             raise RuntimeError("规划模型断点与当前提供方或 HEAD 不匹配。")
-        planned_tests = (self.config.get("coding_provider") in {"claude", "codex"} and
-                         self.config.get("claude", {}).get("planned_core_tests") is True)
+        planned_tests = planned_core_tests(self.config)
         publication = self._publication()
         completion_rule = ("里程碑系统工作完成后返回 action=complete 提交阶段提案，人工待办可继续保留。\n"
                            if publication else "全部目标完成后返回 action=complete。\n")
@@ -1018,8 +1056,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "验收条件写明场景、操作与可观察的预期结果，覆盖本轮核心功能。"
                 "为 action=task 返回 core_tests，列 1 至 5 个可在 NullRHI 执行的完整 ZhuGuoCity 自动化测试名。"
                 "core_tests 每个字符串只能是完整测试名，不得附加括号、验收编号、说明或命令。"
-                "在任务书正文另行注明各测试对应的验收条件，以及是复用还是由 CC 新增。"
-                "CC 提交前跑这组测试，提交后独立复跑。"
+                "在任务书正文另行注明各测试对应的验收条件，以及是复用还是由编码者新增。"
+                "编码者可提交前预跑这组测试，提交后由调度器独立复跑。"
                 "全量自动回归由里程碑检查执行。action=complete 或 blocked 时 core_tests 返回空列表。\n"
             )
         if selection is not None:
@@ -1043,7 +1081,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         operation = state["operation"]
         planning = {key: operation[key] for key in
                     ("planning_model", "planning_reasoning_effort", "planning_level") if key in operation}
-        if planning:
+        if selection is not None and planning:
             if (result.get("planning_level") not in {"routine", "critical"} or
                     not isinstance(result.get("planning_reason"), str) or not result["planning_reason"].strip()):
                 raise ProviderError("分级规划需要有效的 planning_level 和 planning_reason。")
@@ -1108,7 +1146,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "code_base": current, "reworks": 0, "session_id": None, "feedback": "",
                 "code_resume": False}
         task.update(planning)
-        if planning and selection.get("source_output_dir"):
+        if selection and selection.get("source_output_dir"):
             task["planning_source_output_dir"] = selection["source_output_dir"]
         coder = self.config.get("coding_provider", "dsh")
         if coder in {"claude", "codex"}:
@@ -1271,6 +1309,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
     def _art_providers(self, task):
         if self._providers_injected:
             return self.providers
+        if self.config.get("coding_provider") == "codex":
+            if task.get("coding_provider") != "codex":
+                raise ValueError("美术任务必须先转交给当前的 Codex 编码入口。")
+            return self.providers
         config = deepcopy(self.config)
         config["coding_provider"] = "claude"
         settings = config.setdefault("claude", {})
@@ -1279,6 +1321,17 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         for key in ("instructions", "test_preflight", "visual_preflight"):
             settings.pop(key, None)
         return AgentProviders(config)
+
+    def _select_codex_art_coder(self, task):
+        if task.get("coding_provider") != "codex" and task.get("session_id"):
+            task.setdefault("session_history", []).append({"session_id": task["session_id"], "task_id": task["id"],
+                "coding_provider": task.get("coding_provider"), "retired_at": self.now().isoformat(),
+                "reason": "coding_provider_handoff"})
+            task["session_id"] = None
+            task.pop("session_owner_task_id", None)
+            task.pop("session_provider", None)
+        model, effort = codex_role_settings(self.config, "code", now=self.now())
+        task.update(coding_provider="codex", coding_model=model, coding_reasoning_effort=effort)
 
     def _refresh_art_evidence(self, request, evidence):
         """Recheck current bytes/budget without rewriting the reviewed receipt."""
@@ -1294,18 +1347,21 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
 
     def _art_code(self, state, work):
         task = state["task"]
+        using_codex = self.config.get("coding_provider") == "codex"
+        if using_codex and state["operation"] is None:
+            self._select_codex_art_coder(task)
         self._recover_art_recipe_commit(state, work)
         self._validate_art_task(task, work, allow_recipe_dirty=True)
         prompt = (
-            f"你是统一无人值守开发系统中的美术资产制作执行者。本任务使用 {task['coding_model']}、high 思考。\n"
-            "按照已确认的风格参考和本轮任务书，调用调度器追加的固定美术 preview 入口。"
+            f"你是统一无人值守开发系统中的美术资产制作执行者。本任务使用 {task['coding_model']}、{task['coding_reasoning_effort']} 思考。\n"
+            "按照已确认的风格参考和本轮任务书编写美术配方与 Blender 脚本。"
             "具体制作方法和实现选择由你自主决定，维护方不代替你分析或造型。"
             "在用户已确认风格、范围、预算、工具与验收边界内，自主诊断问题、调整实现和重跑。"
             "只有必须改变这些授权边界或缺少不可获得的外部条件时才请求用户决策；"
             "不要把自己以前的自主选型或维护方的历史尝试自动视为用户硬要求。"
             "恢复时复用已有 Tripo 任务、源模型和本地处理缓存；不得重复付费提交未知任务。"
             "本任务在外部资产目录生产，不修改主游戏工作副本、不 git commit、不 push。"
-            "调用完成后读取实际验收包和展示图，说明已完成步骤、费用和待用户视觉确认项。"
+            "可以查看已有验收包与展示图；交付报告需说明本轮实际工作和对应证据。"
             "不能把文件存在、命令退出零或模型文字声明当作美术验收通过。"
             "不得超出三个预览等级、3000积分批次预算或扩大白名单命令。\n"
             "只可编辑可信 art_request.config_file 指定的精确 recipe_file 和 blender_job_file；由控制器核验并提交。"
@@ -1319,12 +1375,23 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             "不得修改可信批次配置。recipe 必须保留批准顺序的全部三级资产：顶层仅 version=1 和 assets，"
             "每条仅 asset_id、revision、prompt、target_height_m、max_footprint_m、front_rotation_deg。"
             "不得加入或修改 level、预算、参考与资产编号。prompt 改动必须只为需要重做的级别递增 vNNN revision；"
-            "仅尺寸或朝向处理可保留 revision 复用模型。修改须处于入口验证的边界内，再调用同一固定 preview。"
+            "仅尺寸或朝向处理可保留 revision 复用模型。修改须处于固定 preview 入口验证的边界内。"
             "没有 recipe_file 时不得创建自定配方或绕过白名单。\n"
             "任务书与当前反馈：\n" + json.dumps(task, ensure_ascii=False))
+        if using_codex:
+            prompt += ("\n完成配方或脚本编辑后交还给调度器。调度器随后执行固定 preview 入口、"
+                       "记录费用和证据，并独立验证验收包。")
+        else:
+            prompt += "\n调用调度器追加的固定美术 preview 入口，完成后说明实际步骤、费用和待用户视觉确认项。"
         result = self._invoke(state, "code", prompt, work, providers=self._art_providers(task))
         if result.get("completed") is not True:
-            raise RuntimeError("Claude 美术制作回合未完成。")
+            raise RuntimeError("美术制作回合未完成。")
+        if using_codex:
+            self._validate_art_task(task, work, allow_recipe_dirty=True)
+            preview_error = self._run_codex_art_preview(state, work)
+            if preview_error:
+                self._art_rework(state, preview_error)
+                return
         self._commit_art_recipe(state, work)
         self._validate_art_task(task, work)
         self._delivery(task, result.get("text", ""))
@@ -1333,6 +1400,27 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         task["check_results"] = []
         task["candidate"] = {"head_sha": gitops.head(work)}
         state.update(operation=None, phase="ART_CHECK")
+
+    def _run_codex_art_preview(self, state, work):
+        from .network import proxy_environment
+        task, op = state["task"], state["operation"]
+        timeout, window_limited = self._timeout(self.config["step_timeout_seconds"])
+        op["window_limited"] = window_limited
+        self._save(state)
+        argv = [sys.executable, str(Path(__file__).with_name("art_pipeline.py").resolve()),
+                "--config", task["art_request"]["config_file"], "preview"]
+        environment = safe_environment()
+        environment.update(proxy_environment(config_path=self.config.get("config_path"),
+                                               secrets_file=self.config.get("secrets_file"),
+                                               network_file=self.config.get("network_file")))
+        directory = Path(op["output_dir"]) / ("preview-" + uuid.uuid4().hex)
+        result = run_process(argv, cwd=work, output_dir=directory, timeout_seconds=timeout,
+                             environment=environment, max_output_bytes=16 * 1024 * 1024)
+        if result.timed_out and window_limited:
+            raise gitops.WindowClosed("美术预览达到工作窗口截止时间。")
+        if result.exit_code != 0 or result.timed_out or result.output_limit_exceeded:
+            return "固定美术预览执行失败，请按本轮证据返工。日志目录：" + str(directory)
+        return None
 
     def _art_rework(self, state, feedback, *, force=False, new_session=False):
         task = state["task"]

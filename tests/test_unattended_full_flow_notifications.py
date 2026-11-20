@@ -42,6 +42,17 @@ class FullFlowNotificationTests(unittest.TestCase):
             self.f.monitor.tick(self.f.snapshot)
         self.f.opener.open.assert_not_called()
 
+    def test_codex_card_requires_fixed_runner_start_proof_and_shows_configured_model(self):
+        self.job.update(actor="Codex", model="gpt-6.2-astra", effort="ultra")
+        self.f.monitor.tick(self.f.snapshot)
+        self.f.opener.open.assert_not_called()
+        self.job["notification_proof"]["test_started"] = True
+        self.f.monitor.tick(self.f.snapshot)
+        self.assertEqual(self.f.opener.open.call_count, 1)
+        body = json.dumps(self.f.payloads()[0], ensure_ascii=False)
+        self.assertIn("gpt-6.2-astra / ultra", body)
+        self.assertNotIn("Opus", body)
+
     def test_failed_test_needs_terminal_evidence_and_reports_failure_not_acceptance(self):
         self.f.monitor.tick(self.f.snapshot)
         self.job.update(status="failed", stage="analysis", summary="原生测试执行失败，报告未完成。")

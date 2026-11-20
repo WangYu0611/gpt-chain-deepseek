@@ -242,8 +242,10 @@ class ArtAutonomy:
         from .providers import validate_output
         task = state["task"]
         pending = task["art_diagnosis"]
+        using_codex = self.config.get("coding_provider") == "codex"
+        author = "Codex" if using_codex else "Claude"
         if pending.get("status") != "pending":
-            self._block(state, "ART_DIAGNOSE", "Claude诊断仍待必要决策或外部条件；不能重复执行旧计划。")
+            self._block(state, "ART_DIAGNOSE", f"{author}诊断仍待必要决策或外部条件；不能重复执行旧计划。")
             state["operation"] = None
             return
         source = pending["fingerprint"]
@@ -254,7 +256,8 @@ class ArtAutonomy:
         prompt = (
             "你是本美术任务的实际制作负责人。请依据自己的制作记录和本轮证据，独立诊断为何未完成，"
             "自主提出下一步计划。调度器不提供候选美术方案，由你决定方法。\n"
-            "此调用为原制作会话的只读分支，只分析和回答，不制作、不执行命令、不调用付费API。"
+            + ("此调用为独立只读诊断，只分析任务与证据，不制作、不调用付费API。"
+               if using_codex else "此调用为原制作会话的只读分支，只分析和回答，不制作、不执行命令、不调用付费API。") +
             "结构化返回action、diagnosis、plan、reason、required_approvals、questions、"
             "additional_tripo_credits、head_sha。\n"
             "已确认风格、批次范围、预算上限、工具权限和用户视觉验收边界保持有效。"
@@ -292,15 +295,15 @@ class ArtAutonomy:
         if not policy["enabled"]:
             reason = "美术自主执行已停用，计划保留待处理。"
         elif result["action"] != "continue" or result["required_approvals"] or result["questions"]:
-            reason = "Claude需要确认：" + ("；".join(result["questions"]) or result["reason"])
+            reason = f"{author}需要确认：" + ("；".join(result["questions"]) or result["reason"])
         elif budget["breached"] or result["additional_tripo_credits"] > budget["remaining"]:
-            reason = "Claude方案预计积分超过当前可用预算，需要调整预算或方案。"
+            reason = f"{author}方案预计积分超过当前可用预算，需要调整预算或方案。"
         progress = digest({key: source[key] for key in ("editable_files", "review_package_sha256")})
         plan_hash = digest(result["plan"].strip())
         if any(row.get("progress_fingerprint") == progress and row.get("plan_sha256") == plan_hash
                and row.get("execution_decision") == "continue" and row.get("art_autonomy_epoch", 0) == epoch
                for row in task.get("art_diagnosis_history", [])):
-            reason = "同一产物与同一Claude计划已执行过，未见新进展，保留诊断待处理。"
+            reason = f"同一产物与同一{author}计划已执行过，未见新进展，保留诊断待处理。"
         receipt.update(progress_fingerprint=progress, plan_sha256=plan_hash,
                        execution_decision="waiting" if reason else "continue", controller_reason=reason)
         # Persist the exact author plan before granting another production
@@ -323,7 +326,7 @@ class ArtAutonomy:
             state["operation"] = None
             self._block(state, "ART_DIAGNOSE", reason)
             return
-        feedback = ("Claude自主诊断后继续制作。以下是你自己的原文计划；在现有授权和固定入口内自主执行，"
+        feedback = (f"{author}自主诊断后继续制作。以下是诊断原文计划；在现有授权和固定入口内自主执行，"
                     "完成后仍提交独立检查和用户视觉验收。\n" + result["diagnosis"] + "\n" + result["plan"])
         current_limit = (self.config["max_reworks"] + task.get("manual_rework_allowance", 0)
                          + task.get("autonomous_rework_allowance", 0))

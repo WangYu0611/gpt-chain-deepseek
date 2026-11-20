@@ -74,6 +74,9 @@ def run(runtime=RUNTIME, *, provider_factory=None):
     """Invoke Claude once, preserving previous runs and cached asset production."""
     runtime = Path(runtime).resolve()
     with runner_lock(runtime):
+        worker = runtime / "worker.json"
+        if worker.is_file() and read_object(worker).get("codex_only") is True:
+            raise ValueError("Use the configured Codex art worker for this runtime")
         config = read_object(runtime / "provider.json")
         if Path(config["runtime_dir"]).resolve() != runtime:
             raise ValueError("Provider configuration belongs to another runtime")

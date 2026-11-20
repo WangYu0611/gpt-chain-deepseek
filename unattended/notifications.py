@@ -30,7 +30,7 @@ TITLES = {"test": "通知连接测试", "window_start": "工作窗口开始", "a
           "blocked": "任务需要处理", "worker_exit": "后台意外退出", "window_end": "工作窗口结束",
           "art_review_ready": "等待视觉验收", "art_accepted": "用户通过已提交",
           "art_rework": "返工意见已提交", "art_blocked": "制作异常待处理",
-          "full_flow_started": "Opus全流程测试开始", "full_flow_finished": "Opus全流程测试结束"}
+          "full_flow_started": "全流程测试开始", "full_flow_finished": "全流程测试结束"}
 PHASES = {"PLAN": "规划任务", "CODE": "编写代码", "CHECK": "独立检查", "REVIEW": "验收审阅",
           "PUBLISH": "本地交付", "MILESTONE_REVIEW": "里程碑验收", "MILESTONE_PUBLISH": "发布里程碑",
           "BLOCKED": "等待处理", "DONE": "目标已完成"}
@@ -176,8 +176,11 @@ def _art_card(snapshot, event, item):
 def _full_flow_card(snapshot, event):
     job = snapshot.get("full_flow_test") or {}
     proof = job.get("notification_proof") or {}
+    codex = job.get("actor") == "Codex"
     if event == "full_flow_started":
-        label, summary = "实际测试已启动", "已确认本次测试执行阶段的 Opus 原生启动记录。规划与准备环境不计作测试启动。"
+        label = "实际测试已启动"
+        summary = ("已确认固定版本的本地验证已开始，由 Codex 核对结果。" if codex else
+                   "已确认本次测试执行阶段的 Opus 原生启动记录。规划与准备环境不计作测试启动。")
     else:
         label = {"checks_passed": "检查回执均标记通过", "checks_failed_or_not_run": "已结束 · 首轮回执含 FAIL 或未运行记录",
                  "execution_failed": "已结束 · 执行失败或中断"}.get(proof.get("outcome"), "已结束 · 结果待核实")
@@ -185,7 +188,8 @@ def _full_flow_card(snapshot, event):
                    "checks_failed_or_not_run": "本次测试已有终态回执与报告；首轮原记录保留，补测与校核结论单独列示，不能将结束视为全通过。",
                    "execution_failed": "本次测试执行失败或中断。" + (_text(job.get("summary"), 200) or "请查看本机终态回执。")}.get(proof.get("outcome"), label)
     head = _text(job.get("head_sha"), 12)
-    fields = ["状态\n" + label, "执行者\nClaude Opus 5.5 / high", "固定版本\n" + head,
+    executor = (_text(job.get("model"), 75) + " / " + _text(job.get("effort"), 16) if codex else "Claude Opus 5.5 / high")
+    fields = ["状态\n" + label, "核验模型\n" + executor, "固定版本\n" + head,
               "阶段\n" + (_text(job.get("stage_label"), 60) or "以本次测试记录为准")]
     elements = [{"tag": "div", "text": _plain(summary)},
                 {"tag": "div", "text": _plain("任务：" + _text(job.get("task_id"), 70) + " · 测试 " + _text(job.get("id"), 12))},
@@ -440,12 +444,16 @@ class NotificationMonitor:
         if not isinstance(job, dict) or job.get("status") not in {"testing", "analyzing", "completed", "failed"} or job.get("stage") in {"plan", "prepare"}:
             return {}
         proof = job.get("notification_proof")
-        if (not isinstance(proof, dict) or proof.get("test_native_started") is not True or
+        codex = job.get("actor") == "Codex"
+        selection_valid = (bool(re.fullmatch(r"gpt-[a-zA-Z0-9.-]{1,70}", str(job.get("model") or ""))) and
+                           job.get("effort") in ("high", "ultra") if codex else
+                           job.get("model") == "claude-opus-5-5" and job.get("effort") == "high")
+        if (not isinstance(proof, dict) or proof.get("test_started" if codex else "test_native_started") is not True or
                 not re.fullmatch(r"[a-f0-9]{64}", str(proof.get("request_sha256") or "")) or
                 not re.fullmatch(r"[a-f0-9]{32}", str(job.get("id") or "")) or
                 not re.fullmatch(r"[a-f0-9]{40}|[a-f0-9]{64}", str(job.get("head_sha") or "")) or
                 not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", str(job.get("task_id") or "")) or
-                job.get("model") != "claude-opus-5-5" or job.get("effort") != "high"):
+                not selection_valid):
             return {}
         key = [job["id"], job["head_sha"]]
         self._queue(journal, settings, snapshot, "full_flow_started", key)
