@@ -55,10 +55,11 @@ class CodexCoderTests(unittest.TestCase):
         self.assertEqual('windows.sandbox="unelevated"' in argv, os.name == "nt")
         self.assertIn("--ignore-user-config", argv)
         self.assertEqual([argv[i + 1] for i, value in enumerate(argv) if value == "--disable"],
-                         ["apps", "computer_use"])
+                         ["apps", "computer_use", "plugins", "remote_plugin"])
         self.assertIn('forced_login_method="chatgpt"', argv)
         self.assertNotIn("resume", argv)
         environment = self.launch.call_args.kwargs["environment"]
+        self.assertTrue(self.launch.call_args.kwargs["private_desktop"])
         self.assertNotIn("CODEX_API_KEY", environment)
         self.assertNotIn("OPENAI_API_KEY", environment)
         receipt = json.loads((self.out / "process.json").read_text())

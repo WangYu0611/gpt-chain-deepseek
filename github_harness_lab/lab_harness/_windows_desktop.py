@@ -32,6 +32,15 @@ def _run(argv: list[str]) -> int:
     user = ctypes.WinDLL("user32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     handle, dword = wintypes.HANDLE, wintypes.DWORD
+    kernel.GetErrorMode.restype = wintypes.UINT
+    kernel.SetErrorMode.argtypes = [wintypes.UINT]
+    kernel.SetErrorMode.restype = wintypes.UINT
+    # Descendants inherit this process mode while retaining their exit status and logs.
+    sem_failcriticalerrors = 0x0001
+    sem_nogpfault_errorbox = 0x0002
+    sem_noopenfile_errorbox = 0x8000
+    kernel.SetErrorMode(kernel.GetErrorMode() | sem_failcriticalerrors |
+                        sem_nogpfault_errorbox | sem_noopenfile_errorbox)
     user.CreateDesktopW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p,
                                    dword, dword, ctypes.c_void_p]
     user.CreateDesktopW.restype = handle

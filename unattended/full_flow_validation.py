@@ -147,7 +147,7 @@ def _native_turn(config, source, output, prompt, model, effort):
     result = run_process(argv, cwd=source, output_dir=output, timeout_seconds=1800,
                          environment=environment, stdin=prompt.encode("utf-8"),
                          secrets=secret_values(config_path=config.get("config_path"), secrets_file=config.get("secrets_file")),
-                         max_output_bytes=64 * 1024 * 1024)
+                         max_output_bytes=64 * 1024 * 1024, private_desktop=config.get("headless", False))
     receipt = {"exit_code": result.exit_code, "timed_out": result.timed_out,
                "output_limit_exceeded": result.output_limit_exceeded, "finished_at": now(),
                "model_selection": {"requested_model": model, "requested_reasoning_effort": effort}}

@@ -91,6 +91,8 @@ import ctypes as C
 from ctypes import wintypes as W
 u = C.WinDLL("user32", use_last_error=True)
 k = C.WinDLL("kernel32")
+k.GetErrorMode.restype = W.UINT
+assert k.GetErrorMode() & 0x8003 == 0x8003
 u.GetThreadDesktop.argtypes = [W.DWORD]
 u.GetThreadDesktop.restype = W.HANDLE
 u.GetUserObjectInformationW.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.c_void_p]

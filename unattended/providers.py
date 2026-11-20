@@ -2181,7 +2181,8 @@ def _codex_windows_sandbox_args(settings: dict, *, default=None) -> list[str]:
 def _codex_headless_args(config: dict) -> list[str]:
     if not config.get("headless"):
         return []
-    return ["--ignore-user-config", "--disable", "apps", "--disable", "computer_use"]
+    return ["--ignore-user-config", "--disable", "apps", "--disable", "computer_use",
+            "--disable", "plugins", "--disable", "remote_plugin"]
 
 
 def _codex_api_key(config_path: str | Path | None = None, *,
@@ -2964,7 +2965,8 @@ class AgentProviders:
             result = run_process(argv, cwd=cwd, output_dir=out, timeout_seconds=timeout,
                                  environment=environment, stdin=prompt.encode("utf-8"),
                                  max_output_bytes=capture_limit,
-                                 secrets=secrets, **capture_options)
+                                 secrets=secrets, private_desktop=self.config.get("headless", False),
+                                 **capture_options)
         except (OSError, RuntimeError, ValueError) as error:
             updating = ((kind in {"plan", "review"} or coding_provider == "codex") and isinstance(error, OSError) and
                         (getattr(error, "errno", None) == errno.ENOENT or getattr(error, "winerror", None) in {2, 3}) and
