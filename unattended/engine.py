@@ -1050,6 +1050,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             "已由独立美术任务处理、等待用户视觉确认的资产（不重新派发、不阻塞其他开发）：\n" +
             json.dumps([{key: item.get(key) for key in ("id", "title", "review_package", "review_package_sha256")} for item in state.get("art_pending", [])], ensure_ascii=False) + "\n"
             "阶段复核尚待解决的反馈：\n" + state.get("milestone_feedback", ""))
+        if self.config.get("codex_only"):
+            prompt += (
+                "\n以当前本地工作区的固定 HEAD 为规划依据。使用本地只读命令核对源码、说明和 Git 状态；"
+                "尚未发布的提交只能在本地核实。禁止使用 GitHub 或远端旧版资料代替当前提交的证据。\n")
         if planned_tests:
             prompt += (
                 "\n任务书明确写出玩家能完成的流程、本次功能范围和明确留到后续的事项。"

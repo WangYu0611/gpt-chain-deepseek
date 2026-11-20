@@ -348,6 +348,8 @@ def load_config(path: Path) -> dict:
         raise ValueError("codex.planned_core_tests 必须为布尔值。")
     if type(codex.get("tiered_planning", False)) is not bool:
         raise ValueError("codex.tiered_planning 必须为布尔值。")
+    if "windows_sandbox" in codex and codex["windows_sandbox"] not in ("unelevated", "elevated", "mxc"):
+        raise ValueError("codex.windows_sandbox 必须为 unelevated、elevated 或 mxc。")
     if codex.get("planned_core_tests") and not {"ue-editor-build", "ue-task-validation"} <= {check["id"] for check in config["checks"]}:
         raise ValueError("任务书核心测试需要独立 UE 编译与验证。")
     review_transport = config["codex"].get("review_transport", "codex")

@@ -34,6 +34,13 @@ class ConfigurationTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.value if value is None else value, ensure_ascii=False), encoding="utf-8")
         return self.path
 
+    def test_validates_optional_windows_backend(self):
+        self.value["codex"]["windows_sandbox"] = "unelevated"
+        self.assertEqual(config.load_config(self.save())["codex"]["windows_sandbox"], "unelevated")
+        self.value["codex"]["windows_sandbox"] = "off"
+        with self.assertRaisesRegex(ValueError, "windows_sandbox"):
+            config.load_config(self.save())
+
     def test_paths_resolve_against_config_parent(self):
         loaded = config.load_config(self.save())
         self.assertEqual(loaded["project_path"], str(self.project))

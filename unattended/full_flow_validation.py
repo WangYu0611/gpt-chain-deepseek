@@ -16,7 +16,7 @@ from github_harness_lab.lab_harness.process import run_process, safe_environment
 from . import full_flow_checks, gitops, ue_checks
 from .config import codex_role_settings, load_config
 from .network import proxy_environment
-from .providers import AgentProviders, _codex_command, _strict_json, parse_codex_events
+from .providers import AgentProviders, _codex_command, _codex_windows_sandbox_args, _strict_json, parse_codex_events
 from .secrets import secret_values
 from .storage import lock, read_json, write_json, write_text
 
@@ -128,7 +128,8 @@ def _assert_source(request, run):
 
 
 def _native_turn(config, source, output, prompt, model, effort):
-    command = _codex_command(config.get("codex", {}).get("command"))
+    settings = config.get("codex", {})
+    command = _codex_command(settings.get("command"))
     environment = safe_environment()
     environment.update(proxy_environment(config_path=config.get("config_path"),
                                          secrets_file=config.get("secrets_file"), network_file=config.get("network_file")))
@@ -139,8 +140,7 @@ def _native_turn(config, source, output, prompt, model, effort):
     argv = [*command, "--no-daemon", "-a", "never", "exec", "--ignore-user-config", "--sandbox", "read-only",
             "--json", "--color", "never", "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
             "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"']
-    if os.name == "nt":
-        argv.extend(["-c", 'windows.sandbox="elevated"'])
+    argv.extend(_codex_windows_sandbox_args(settings, default="elevated"))
     argv.append("-")
     result = run_process(argv, cwd=source, output_dir=output, timeout_seconds=1800,
                          environment=environment, stdin=prompt.encode("utf-8"),

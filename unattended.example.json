@@ -45,6 +45,7 @@
     "effort_after_change": "high",
     "tiered_planning": true,
     "auth_mode": "chatgpt",
+    "windows_sandbox": "unelevated",
     "review_transport": "codex",
     "review_transport_after_effort_change": "responses_api",
     "sandbox": "read-only"

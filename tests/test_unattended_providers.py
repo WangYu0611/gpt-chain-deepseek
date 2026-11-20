@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -73,6 +74,16 @@ class ProviderTests(unittest.TestCase):
         write_events(out / "stdout.log", events)
         (out / "stderr.log").write_text("", encoding="utf-8")
         return ProcessResult(1, timed_out, False, out / "stdout.log", out / "stderr.log")
+
+    @patch("unattended.providers.run_process")
+    def test_background_windows_backend_keeps_planning_read_only(self, process):
+        process.side_effect = self.fake_codex
+        self.providers.config["codex"]["windows_sandbox"] = "unelevated"
+        self.assertEqual(self.providers.plan("Plan", self.root, self.root / "plan", 30), PLAN)
+        argv = process.call_args.args[0]
+        self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+        self.assertEqual(argv[argv.index("-a") + 1], "never")
+        self.assertEqual('windows.sandbox="unelevated"' in argv, os.name == "nt")
 
     @patch("unattended.providers.run_process")
     def test_plan_uses_read_only_noninteractive_cli_and_recovers_without_calling(self, process):

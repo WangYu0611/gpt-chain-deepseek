@@ -2173,6 +2173,11 @@ def _codex_command(value: Any) -> list[str]:
                         transient=True, retry_reason="local_cli_unavailable")
 
 
+def _codex_windows_sandbox_args(settings: dict, *, default=None) -> list[str]:
+    mode = settings.get("windows_sandbox", default)
+    return ["-c", "windows.sandbox=" + json.dumps(mode)] if os.name == "nt" and mode else []
+
+
 def _codex_api_key(config_path: str | Path | None = None, *,
                    secrets_file: str | Path | None = None) -> str | None:
     """Prefer current local settings over a background process's inherited key."""
@@ -2307,7 +2312,8 @@ class AgentProviders:
         _atomic_json(out / "schema.json", schema)
         permission_args = (_codex_read_only_profile(art_directory, out) if art_directory is not None
                            else ["--sandbox", sandbox])
-        argv = [*command, "--no-daemon", "-a", "never", "exec", *permission_args, "--json",
+        argv = [*command, "--no-daemon", "-a", "never", "exec", *permission_args,
+                *_codex_windows_sandbox_args(settings), "--json",
                 "--color", "never", "--output-schema", str(out / "schema.json"),
                 "-o", str(out / "final.json")]
         if settings.get("model"):
@@ -2491,7 +2497,8 @@ class AgentProviders:
             self._check_codex_subscription(command, cwd, environment, deadline)
         except ProviderError as error:
             raise ProviderError("Codex coding requires a saved native ChatGPT login", interrupted=error.interrupted) from None
-        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile, "--color", "never"]
+        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile,
+                *_codex_windows_sandbox_args(settings), "--color", "never"]
         if session_id is not None:
             argv.append("resume")
         argv.extend(["--json", "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
@@ -2723,7 +2730,8 @@ class AgentProviders:
         out.mkdir(parents=True, exist_ok=True)
         _atomic_json(out / "schema.json", ART_DIAGNOSE_SCHEMA)
         profile = _codex_read_only_profile(directories[1], out, extra_directories=(directories[2],))
-        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile, "--json", "--color", "never",
+        argv = [*command, "--no-daemon", "-a", "never", "exec", *profile,
+                *_codex_windows_sandbox_args(self.config.get("codex", {})), "--json", "--color", "never",
                 "--model", model, "-c", "model_reasoning_effort=" + json.dumps(effort),
                 "-c", 'model_provider="openai"', "-c", 'forced_login_method="chatgpt"',
                 "--output-schema", str(out / "schema.json"), "-"]
