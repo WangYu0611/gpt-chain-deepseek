@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from github_harness_lab.lab_harness.process import ProcessResult
 from unattended.providers import (AgentProviders, ProviderError, _codex_api_key, classify_transient_failure,
@@ -332,6 +332,61 @@ class ProviderTests(unittest.TestCase):
                 (out / "result.json").unlink()  # Simulate a stop before publishing the aggregate result.
                 self.assertEqual(self.providers.recover(kind, out), expected)
                 self.assertEqual(process.call_count, 2)
+
+    @patch("unattended.providers._codex_art_review_directory")
+    @patch("unattended.providers.AgentProviders._check_codex_subscription")
+    @patch("unattended.providers.run_process")
+    @patch("unattended.gitops.head", return_value=REVIEW["head_sha"])
+    def test_responses_exhaustion_uses_subscription_and_recovers_bound_review(self, head, process, login, art):
+        from unattended import api_review as api
+
+        self.providers.config["codex"].update(review_transport="responses_api", responses_subscription_fallback=True,
+                                               auth_mode="api_key", model="gpt-6.2-astra", reasoning_effort="ultra",
+                                               review_instructions="Use the same acceptance criteria")
+        self.providers.config["headless"] = True
+        out = self.root / "responses"
+        art.return_value = None
+        process.side_effect = self.fake_codex
+        evidence = Mock(head_sha=REVIEW["head_sha"], tools=[], instructions="")
+        keys = ["synthetic-primary", "synthetic-backup-1", "synthetic-backup-2"]
+        unavailable = api._RequestFailure(status=403)
+        with patch.object(api, "ReviewEvidence", return_value=evidence), \
+             patch.object(api, "_codex_api_keys", return_value=keys), \
+             patch.object(api, "read_secret", return_value=None), \
+             patch.object(api, "_post", side_effect=unavailable) as post, \
+             patch.dict(os.environ, {"CODEX_API_KEY": keys[0], "OPENAI_API_KEY": keys[1],
+                                     "OPENAI_BASE_URL": "https://example.invalid"}):
+            self.assertEqual(self.providers.review("Review", self.root, out, 30), REVIEW)
+        login.assert_called_once()
+        self.assertEqual([call.args[1] for call in post.call_args_list], keys)
+        self.assertEqual(head.call_count, 2)
+        self.assertTrue(all(call.args[2] == out.resolve() for call in art.call_args_list))
+        _, args, kwargs = process.mock_calls[0]
+        self.assertIn('forced_login_method="chatgpt"', args[0])
+        self.assertIn('model_reasoning_effort="ultra"', args[0])
+        self.assertIn("gpt-6.2-astra", args[0])
+        self.assertTrue(kwargs["private_desktop"])
+        self.assertEqual(kwargs["stdin"].decode("utf-8"), "Review\nUse the same acceptance criteria")
+        self.assertTrue({"CODEX_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL"}.isdisjoint(kwargs["environment"]))
+        child = kwargs["output_dir"]
+        self.assertEqual(child, out / "codex-subscription")
+        parent_process = out / "process.json"
+        child_process = child / "process.json"
+        source = api.subscription_fallback_source(out)
+        self.assertEqual(source["reason"], "credentials_exhausted")
+        self.assertEqual(json.loads(child_process.read_text())["responses_fallback_source"], source)
+        self.assertEqual(json.loads(parent_process.read_text())["status"], "failed")
+        (out / "result.json").unlink()
+        self.assertEqual(self.providers.recover("review", out), REVIEW)
+        process.assert_called_once()
+        with self.assertRaisesRegex(ProviderError, "API failure binding"):
+            self.providers.recover("review", child)
+        final = child / "final.json"
+        final.write_text(json.dumps({**REVIEW, "head_sha": "b" * 40}), encoding="utf-8")
+        with self.assertRaisesRegex(ProviderError, "API failure binding"):
+            self.providers.recover("review", out)
+        parent_process.write_bytes(parent_process.read_bytes() + b"\n")
+        self.assertIsNone(self.providers.recover("review", out))
 
     @patch("unattended.providers._codex_api_key", return_value="synthetic-api-test-secret")
     @patch("unattended.providers.subprocess.run")

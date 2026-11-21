@@ -46,15 +46,17 @@ if (!(Test-Path secrets.local.json)) { Copy-Item secrets.example.json secrets.lo
 | 字段 | 使用场景 |
 | --- | --- |
 | `CODEX_API_KEY` | Responses API 核验优先使用的主密钥。 |
-| `CODEX_API_KEY_BACKUPS` | Responses API 核验使用的有序备用密钥。主密钥遇到额度、授权或模型权限问题时依次尝试。 |
+| `CODEX_API_KEY_BACKUPS` | Responses API 核验使用的有序备用密钥。遇到授权、额度、限流或模型可用性问题时换用下一把。 |
 | `CODEX_BASE_URL` | 可选 OpenAI Responses API 地址，留空使用官方服务。 |
 | `DEEPSEEK_API_KEY` | 使用 DeepSeek API 的 dsh 配置。 |
 | `TRIPO_API_KEY` | 在美术批次的 `key_file` 中填入 `secrets.local.json` 的绝对路径，该文件须位于目标项目目录之外。 |
 | `FEISHU_WEBHOOK_URL` | 启用本地飞书通知且通知设置未填写 `webhook_url` 时使用。默认在 `.unattended/feishu.local.json` 中设置启用状态、事件与面板地址。 |
 
-项目启用 `codex_only`。开发使用 `gpt-6.2-sol`，规划和核验使用 `gpt-6.2-astra`。Codex CLI 使用已登录的 ChatGPT 订阅，GitHub 推送使用 Git 已配置的凭据。北京时间 2026-11-22 00:00 起，所有新调用改用 `high`，独立核验通过 `review_transport_after_effort_change` 切到 Responses API。
+项目启用 `codex_only`。开发使用 `gpt-6.2-sol`，规划和核验使用 `gpt-6.2-astra`。Codex CLI 使用已登录的 ChatGPT 订阅，GitHub 推送使用 Git 已配置的凭据。北京时间 2026-11-22 00:00 起，所有新调用改用 `high`。
 
-任务、阶段与美术审核支持直接调用 OpenAI Responses API。在 `codex` 配置中设置 `"review_transport": "responses_api"`，并配置 `model`、`reasoning_effort` 和共享密钥文件。审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 响应与工具记录保存在对应运行目录，重启时验证回执后恢复。该模式通过 `CODEX_API_KEY` 调用普通 API，API 错误会记录并按类型重试。
+任务、阶段与美术核验可设置 `"review_transport": "responses_api"`，先用主密钥，再按顺序试备用密钥。启用 `"responses_subscription_fallback": true` 后，密钥全部不可用或服务在有限重试后仍不可达，同一轮核验会通过已登录的 Codex CLI 订阅重新读取同一提交的证据。订阅沿用本轮模型，使用发起调用时的思考档位。有效的验收结论会直接保存，证据或协议校验失败会正常报错。
+
+审核者通过只读工具读取固定 HEAD 的源码、提交差异、检查日志及审核图片，返回绑定该 HEAD 的结构化结论。API 回执保存在运行目录，订阅回执保存在下级 `codex-subscription` 目录。重启时可用已完成的回执恢复核验结果。
 
 短暂连接中断会在当前请求内有限重试。需要重新启动审核时，系统校验原请求、固定提交与已读取证据，将完成的审核轮次复制到新运行目录后续接。面板显示已完成轮数、续接轮数和最近回执时间。
 

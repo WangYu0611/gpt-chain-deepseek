@@ -317,7 +317,7 @@ class ConfigurationTests(unittest.TestCase):
         with patch.object(config.gitops, "head", return_value="a" * 40), \
              patch.object(config.gitops, "git", return_value="identity"), \
              patch.object(config.shutil, "which", side_effect=lambda executable: "claude.exe" if executable == "claude.exe" else None), \
-             patch("unattended.providers._codex_api_key", return_value="synthetic-api-key") as key:
+             patch("unattended.providers._codex_api_keys", return_value=["synthetic-api-key"]) as key:
             result = config.doctor(candidate)
             self.assertTrue(result["ready"])
             self.assertFalse(result["checks"]["codex_available"])
@@ -330,7 +330,16 @@ class ConfigurationTests(unittest.TestCase):
             missing_key = config.doctor(candidate)
             self.assertFalse(missing_key["ready"])
             self.assertFalse(missing_key["checks"]["codex_api_key_configured"])
-            key.return_value = "synthetic-api-key"
+            candidate["codex"]["responses_subscription_fallback"] = True
+            fallback = config.doctor(candidate)
+            self.assertFalse(fallback["ready"])
+            self.assertTrue(fallback["checks"]["codex_cli_required"])
+            self.assertTrue(fallback["checks"]["codex_subscription_fallback_enabled"])
+            with patch.object(config.shutil, "which", return_value="available"):
+                fallback = config.doctor(candidate)
+            self.assertTrue(fallback["ready"])
+            self.assertFalse(fallback["checks"]["codex_api_key_configured"])
+            key.return_value = ["synthetic-api-key"]
             candidate["codex"].pop("model")
             self.assertFalse(config.doctor(candidate)["ready"])
 

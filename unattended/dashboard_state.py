@@ -298,40 +298,62 @@ def _codex_turn_started(stdout):
     return isinstance(turn, dict) and turn.get("type") == "turn.started"
 
 
-def _codex_route(runtime, directory, kind):
-    """Select the active transcript only after confirming its authentication route."""
+def _codex_subscription_started(runtime, child, kind, *, responses_source=None):
+    receipt = _object(_confined(runtime, child / "process.json"), missing=None, maximum=16384)
+    stdout = _confined(runtime, child / "stdout.log")
+    if receipt is not None:
+        return (receipt.get("kind") == kind and receipt.get("codex_auth_mode") == "chatgpt"
+                and type(receipt.get("exit_code")) is int
+                and (responses_source is None or receipt.get("responses_fallback_source") == responses_source))
+    if responses_source is not None:
+        parent_receipt = _confined(runtime, child.parent / "process.json")
+        if stdout.stat().st_mtime_ns < parent_receipt.stat().st_mtime_ns:
+            return False
+    return _codex_turn_started(stdout)
+
+
+def _codex_route(runtime, directory, kind, *, head_sha=None):
+    """Return the authenticated route, transcript directory, and Responses fallback eligibility."""
     try:
         api = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=1024 * 1024)
     except (OSError, ValueError, RuntimeError):
-        return None, directory
+        return None, directory, False
     if api.get("protocol") == "openai_responses_v1":
         running = api.get("status") == "running" and api.get("exit_code") is None
         finished = api.get("status") in ("completed", "failed") and type(api.get("exit_code")) is int
         mode = "responses_api" if kind == "review" and api.get("kind") == kind and (running or finished) else None
-        return mode, directory
+        if mode != "responses_api" or api.get("status") != "failed":
+            return mode, directory, False
+        fallback = False
+        try:
+            from .api_review import subscription_fallback_source
+
+            source = subscription_fallback_source(directory)
+            fallback = source is not None and (head_sha is None or source.get("head_sha") == head_sha)
+            child = _confined(runtime, directory / _CODEX_SUBSCRIPTION_DIR)
+            if fallback and child.is_dir() and _codex_subscription_started(runtime, child, kind, responses_source=source):
+                return "chatgpt", child, True
+        except (OSError, ValueError, RuntimeError, RecursionError):
+            pass
+        return mode, directory, fallback
     if kind == "code":
         native = (api.get("kind") == "code" and api.get("coding_provider") == "codex" and
                   api.get("coding_protocol") == "codex_exec_v1" and api.get("coding_sandbox") == "workspace-write" and
                   api.get("codex_auth_mode") == "chatgpt" and type(api.get("exit_code")) is int)
-        return ("chatgpt" if native else None), directory
+        return ("chatgpt" if native else None), directory, False
     if api.get("kind") == kind and api.get("codex_auth_mode") == "chatgpt" and type(api.get("exit_code")) is int:
-        return "chatgpt", directory
+        return "chatgpt", directory, False
     if api.get("kind") != kind or api.get("codex_auth_mode") != "api_key" or type(api.get("exit_code")) is not int:
-        return None, directory
+        return None, directory, False
     try:
         child = _confined(runtime, directory / _CODEX_SUBSCRIPTION_DIR)
         if api.get("codex_subscription_fallback") is True and child.is_dir():
-            receipt = _object(_confined(runtime, child / "process.json"), missing=None, maximum=16384)
-            stdout = _confined(runtime, child / "stdout.log")
-            confirmed = (_codex_turn_started(stdout) if receipt is None else
-                         receipt.get("kind") == kind and receipt.get("codex_auth_mode") == "chatgpt"
-                         and type(receipt.get("exit_code")) is int)
             _confined(runtime, directory / "stdout.log")
-            if confirmed and _codex_api_quota_failed(kind, directory):
-                return "chatgpt", child
+            if _codex_subscription_started(runtime, child, kind) and _codex_api_quota_failed(kind, directory):
+                return "chatgpt", child, False
     except (OSError, ValueError, RuntimeError):
         pass
-    return "api_key", directory
+    return "api_key", directory, False
 
 
 def _claude_directory(runtime, directory, kind):
@@ -375,7 +397,7 @@ def _api_review_progress(runtime, directory, operation):
         return None
 
 
-def _attempt_finished_at(runtime, directory, operation, check_id, started_at, updated_at):
+def _attempt_finished_at(runtime, directory, operation, check_id, started_at, updated_at, *, responses_fallback_pending=False):
     """Use the receipt from the operation shown in the activity panel."""
     if directory is None or started_at is None:
         return None
@@ -396,15 +418,16 @@ def _attempt_finished_at(runtime, directory, operation, check_id, started_at, up
         finished = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
         if finished < datetime.fromisoformat(started_at):
             return None
-        # An API quota receipt can appear before the child transcript starts.
+        # An API failure receipt can appear before the child transcript starts.
         # Keep the operation open until fallback starts or the worker persists
         # its outcome. The caller passes the child directory once confirmed.
         checkpoint = _iso(updated_at)
-        if (receipt.get("codex_auth_mode") == "api_key" and
-                receipt.get("codex_subscription_fallback") is True and
-                (checkpoint is None or datetime.fromisoformat(checkpoint) < finished) and
-                _codex_api_quota_failed(kind, directory)):
-            return None
+        if checkpoint is None or datetime.fromisoformat(checkpoint) < finished:
+            if responses_fallback_pending:
+                return None
+            if (receipt.get("codex_auth_mode") == "api_key" and
+                    receipt.get("codex_subscription_fallback") is True and _codex_api_quota_failed(kind, directory)):
+                return None
         return finished
     except (OSError, ValueError, RuntimeError, RecursionError):
         return None
@@ -1612,7 +1635,8 @@ def collect_snapshot(config_path: Path) -> dict:
         policy = codex.get("auth_mode", "inherit")
         snapshot["codex_auth"]["policy"] = "api_then_subscription" if codex.get("subscription_fallback") is True else policy
         if codex_review_transport(config, now=now) == "responses_api":
-            snapshot["codex_auth"]["policy"] = "responses_api"
+            snapshot["codex_auth"]["policy"] = ("responses_then_subscription"
+                                                  if codex.get("responses_subscription_fallback") is True else "responses_api")
         snapshot["check_progress"]["total"] = len(config["checks"])
         snapshot["worker"] = _worker(runtime, config_path, now)
         state = _object(_confined(runtime, runtime / "state.json"), missing=None)
@@ -1792,8 +1816,11 @@ def collect_snapshot(config_path: Path) -> dict:
                       "REVIEW": "review", "MILESTONE_REVIEW": "review"}.get(operation_phase)
         codex_operation = kind == "review" or (kind == "plan" and planning_name == "Codex") or (
             kind == "code" and operation.get("coding_provider") == "codex")
+        responses_fallback_pending = False
         if directory and owns_operation and codex_kind and kind == codex_kind and codex_operation:
-            mode, directory = _codex_route(runtime, directory, codex_kind)
+            mode, directory, responses_fallback = _codex_route(runtime, directory, codex_kind, head_sha=operation.get("head_sha"))
+            responses_fallback_pending = (responses_fallback and mode == "responses_api" and phase not in {"BLOCKED", "DONE"}
+                                          and snapshot["worker"]["alive"] and snapshot["worker"]["healthy"])
             snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt" and directory.name == _CODEX_SUBSCRIPTION_DIR)
         elif directory and owns_operation and (
                 kind == "code" and operation.get("coding_provider") == "claude" or
@@ -1802,7 +1829,8 @@ def collect_snapshot(config_path: Path) -> dict:
         matches_operation = owns_operation and kind is not None and kind in {
             codex_kind, check_kind, "code" if operation_phase == "CODE" else None}
         finished_at = (_attempt_finished_at(runtime, directory, operation, check_id,
-                                            status["started_at"], state.get("updated_at"))
+                                            status["started_at"], state.get("updated_at"),
+                                            responses_fallback_pending=responses_fallback_pending)
                        if matches_operation
                        else None)
         activity_actor = _CODING_NAMES[operation.get("coding_provider", "dsh")] if kind == "code" else actor
@@ -1812,6 +1840,9 @@ def collect_snapshot(config_path: Path) -> dict:
         snapshot["api_review"] = progress
         if progress:
             suffix = {"running": "等待当前请求回执", "completed": "本次审核已结束", "failed": "本次审核未完成，等待重试"}[progress["api_status"]]
+            if responses_fallback_pending and finished_at is None:
+                progress["fallback_pending"] = True
+                suffix = "正在切换至 Codex 订阅"
             text = f"已完成 {progress['completed_response_rounds']} 轮审核 · " + suffix
             if progress["resumed_rounds"]:
                 text += f"（续接 {progress['resumed_rounds']} 轮）"

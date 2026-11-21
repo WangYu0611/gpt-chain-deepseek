@@ -114,25 +114,28 @@ class Evidence:
         (self.logs if log else self.artifacts).append(row)
 
 
-def _provider_files(evidence, runtime, directory, *, title="当前操作"):
+def _provider_files(evidence, runtime, directory, *, title="当前操作", head_sha=None):
     directory = _confined(runtime, Path(directory))
     if directory.parent != runtime / "runs" or not re.fullmatch(r"(?:code|plan|review|check|art_check|art_diagnose|milestone_check)-[a-f0-9]{32}", directory.name):
         raise ValueError("模型操作目录不匹配")
     kind = directory.name.split("-", 1)[0]
-    route, selected = _codex_route(runtime, directory, kind) if kind in {"plan", "code", "review"} else (None, directory)
+    _, selected, responses_fallback = (_codex_route(runtime, directory, kind, head_sha=head_sha)
+                                       if kind in {"plan", "code", "review"} else (None, directory, False))
     subscription = "Codex"
     if selected == directory and kind in {"plan", "code", "art_diagnose"}:
         selected = _claude_directory(runtime, directory, kind)
         subscription = "Claude Code"
+    api_attempt = " · Responses API 尝试" if responses_fallback else " · API 首次尝试（额度失败）"
     attempts = [(directory, title)] if selected == directory else [
-        (directory, title + " · API 首次尝试（额度失败）"),
+        (directory, title + api_attempt),
         (selected, title + " · " + subscription + (" 订阅续接" if subscription == "Claude Code" else " 订阅尝试"))]
     for attempt, label in attempts:
         for name in ("stdout.log", "stderr.log"):
             # Provider stdout is event-label projection only, never native chat.
             evidence.add(runtime, attempt / name, label + (" · 事件摘要" if name == "stdout.log" else " · 错误日志"),
                          mode="events" if name == "stdout.log" else "errors", log=True)
-        process = _object(_confined(runtime, attempt / "process.json"), missing={}, maximum=65536)
+        process = _object(_confined(runtime, attempt / "process.json"), missing={},
+                          maximum=1024 * 1024 if kind == "review" else 65536)
         if process:
             keys = ("kind", "exit_code", "timed_out", "output_limit_exceeded", "launch_or_capture_failed", "launch_error",
                     "coding_provider", "coding_model", "coding_reasoning_effort", "planning_provider", "planning_model",
@@ -942,7 +945,7 @@ def _collect(config_path, lane, node, snapshot=None):
                 for name in ("stdout.log", "stderr.log"):
                     evidence.add(runtime, directory / name, "当前检查 · " + name, mode="text", log=True)
             else:
-                _provider_files(evidence, runtime, op["output_dir"])
+                _provider_files(evidence, runtime, op["output_dir"], head_sha=op.get("head_sha"))
         directory = _confined(runtime, runtime / "tasks" / task["id"])
         if node in {"routine_plan", "critical_plan"} and task.get("planning_source_output_dir"):
             is_critical = task.get("planning_level") == "critical"
@@ -1004,7 +1007,7 @@ def _collect(config_path, lane, node, snapshot=None):
                 if isinstance(record, dict) and record.get("head_sha") == milestone.get("head_sha"):
                     evidence.virtual("阶段审核回执", record)
                 if op.get("kind") in {"review", "milestone_check"} and op.get("task_id") is None and op.get("head_sha") == milestone.get("head_sha"):
-                    _provider_files(evidence, runtime, op["output_dir"], title="当前阶段操作")
+                    _provider_files(evidence, runtime, op["output_dir"], title="当前阶段操作", head_sha=op.get("head_sha"))
             elif milestone.get("report_path"):
                 path = runtime / "milestones" / identity / "report.json"
                 if Path(milestone["report_path"]).absolute() != path:

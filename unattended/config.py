@@ -365,6 +365,8 @@ def load_config(path: Path) -> dict:
         raise ValueError("codex.review_transport_after_effort_change 需要有效的审核入口和切档时间。")
     if "responses_api" in (review_transport, review_after_change) and not config["codex"].get("model"):
         raise ValueError("Responses API 验收需要显式配置 codex.model。")
+    if type(codex.get("responses_subscription_fallback", False)) is not bool:
+        raise ValueError("codex.responses_subscription_fallback 必须为布尔值。")
     if config["codex"].get("auth_mode", "inherit") not in ("inherit", "api_key", "chatgpt"):
         raise ValueError("codex.auth_mode 必须为 inherit、api_key 或 chatgpt。")
     for role in ("plan", "review"):
@@ -483,8 +485,10 @@ def doctor(config: dict) -> dict:
         # Doctor is an inventory, including during an incomplete desktop update.
         checks["codex_available"] = False
     direct_review = codex_review_transport(config) == "responses_api"
+    responses_fallback = direct_review and config["codex"].get("responses_subscription_fallback", False)
     coder = config.get("coding_provider", "dsh")
-    codex_cli_required = not direct_review or config.get("planning_provider", "codex") == "codex" or coder == "codex"
+    codex_cli_required = (not direct_review or responses_fallback or
+                          config.get("planning_provider", "codex") == "codex" or coder == "codex")
     checks["codex_cli_required"] = codex_cli_required
     checks["review_transport"] = "responses_api" if direct_review else "codex"
     api_mode = direct_review or config["codex"].get("auth_mode") == "api_key"
@@ -497,7 +501,10 @@ def doctor(config: dict) -> dict:
             codex_auth_ready = False
     if api_mode:
         checks["codex_api_key_configured"] = codex_auth_ready
-        checks["codex_subscription_fallback_enabled"] = config["codex"].get("subscription_fallback", False)
+        checks["codex_subscription_fallback_enabled"] = (
+            responses_fallback if direct_review else config["codex"].get("subscription_fallback", False))
+        if responses_fallback and config["codex"].get("auth_mode") != "api_key":
+            codex_auth_ready = True
     review_model_ready = not direct_review or bool(config["codex"].get("model"))
     if direct_review:
         checks["review_model_configured"] = review_model_ready

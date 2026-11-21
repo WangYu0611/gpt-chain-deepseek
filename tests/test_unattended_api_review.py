@@ -379,6 +379,86 @@ class ApiReviewTests(unittest.TestCase):
         self.assertEqual(receipt["request_failures"][0]["credential_slot"], 1)
         self.assertNotIn(backup, json.dumps(receipt))
 
+    def test_long_primary_rate_limit_rotates_to_backup_without_waiting(self):
+        primary, backup = "private-api-credential", "private-backup-credential"
+        self.config["codex"]["responses_subscription_fallback"] = True
+        with (patch.object(api, "_codex_api_keys", return_value=[primary, backup]),
+              patch.object(api, "REQUEST_ATTEMPTS", 4), patch.object(api.time, "sleep") as sleep):
+            self.assertEqual(self.invoke([api._RequestFailure(status=429, reason="rate_limited", retry_after=3600),
+                                          *self.exchange()]), RESULT)
+        self.assertEqual([row[1] for row in self.requests], [primary, backup, backup])
+        self.assertEqual(self.requests[0][0], self.requests[1][0])
+        self.assertLessEqual(self.requests[0][3], 7.5)
+        sleep.assert_not_called()
+        self.assertIsNone(api.subscription_fallback_source(self.out))
+
+    def test_exhausted_credentials_supply_verified_subscription_binding(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        keys = ["private-api-credential", "private-backup-credential", "private-other-credential"]
+        with patch.object(api, "_codex_api_keys", return_value=keys), self.assertRaises(ProviderError):
+            self.invoke([api._RequestFailure(status=401, code="invalid_api_key"),
+                         api._RequestFailure(status=429, code="insufficient_quota"),
+                         api._RequestFailure(status=400, code="invalid_value", parameter="reasoning.effort")])
+        self.assertEqual([row[1] for row in self.requests], keys)
+        path = self.out / "process.json"
+        raw = path.read_bytes()
+        self.assertEqual(api.subscription_fallback_source(self.out), {
+            "head_sha": HEAD, "workspace": str(self.root.resolve()), "model": "gpt-test", "reasoning_effort": "high",
+            "reason": "credentials_exhausted", "api_receipt_sha256": api._hash(raw),
+        })
+        self.assertTrue(all(key.encode() not in raw for key in keys))
+        receipt = json.loads(raw)
+        receipt["unavailable_credentials"].pop(0)
+        path.write_text(json.dumps(receipt))
+        self.assertIsNone(api.subscription_fallback_source(self.out))
+
+    def test_shared_api_failure_rotates_and_preserves_a_subscription_opportunity(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        keys = ["private-api-credential", "private-backup-credential"]
+        with patch.object(api, "_codex_api_keys", return_value=keys), self.assertRaises(ProviderError):
+            self.invoke([api._RequestFailure(status=503, reason="server_unavailable"),
+                         api._RequestFailure(reason="transport", timed_out=True)])
+        self.assertEqual([row[1] for row in self.requests], keys)
+        self.assertEqual(api.subscription_fallback_source(self.out)["reason"], "api_unavailable")
+
+    def test_api_request_budget_can_yield_to_subscription_before_the_phase_deadline(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        with patch.object(api.time, "monotonic", side_effect=[100, 100, 116]), self.assertRaises(ProviderError):
+            self.invoke([])
+        self.assertEqual(api.subscription_fallback_source(self.out)["reason"], "api_unavailable")
+        self.assertEqual(self.requests, [])
+
+    def test_missing_credentials_require_valid_current_evidence_before_subscription(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        with patch.object(api, "_codex_api_keys", return_value=[]):
+            with self.assertRaisesRegex(ProviderError, "CODEX_API_KEY"):
+                self.invoke([])
+            self.assertEqual(api.subscription_fallback_source(self.out)["reason"], "no_credentials")
+            self.out = self.root / "invalid-evidence"
+            with patch.object(self.evidence, "verify", side_effect=ValueError("Changed evidence")):
+                with self.assertRaisesRegex(ProviderError, "evidence or local receipt"):
+                    self.invoke([])
+            self.assertIsNone(api.subscription_fallback_source(self.out))
+        self.assertEqual(self.requests, [])
+
+    def test_invalid_api_requests_or_outputs_do_not_qualify_for_subscription(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        cases = {
+            "request": [api._RequestFailure(status=400, code="unsupported_value", parameter="schema")],
+            "response": self.exchange({**RESULT, "head_sha": "b" * 40}),
+        }
+        for name, replies in cases.items():
+            self.out = self.root / name
+            with self.subTest(name=name), self.assertRaises(ProviderError):
+                self.invoke(replies)
+            self.assertIsNone(api.subscription_fallback_source(self.out))
+
+    def test_api_rework_judgment_completes_without_subscription(self):
+        self.config["codex"]["responses_subscription_fallback"] = True
+        rework = {**RESULT, "decision": "rework", "feedback": "Fix the regression"}
+        self.assertEqual(self.invoke(self.exchange(rework)), rework)
+        self.assertIsNone(api.subscription_fallback_source(self.out))
+
     def test_truncated_http_diagnostics_record_types_without_raw_partial_body(self):
         with patch.object(api, "build_opener") as build:
             build.return_value.open.side_effect = http.client.IncompleteRead(b"private-api-credential", 500)

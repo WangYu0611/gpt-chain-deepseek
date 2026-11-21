@@ -1200,13 +1200,13 @@
       setTone(slot+'-state',filesystemWaiting||retrying?'warn':active?'working':'','model-state');
     }
     const auth=data.codex_auth||{};
-    const authPolicy={responses_api:'OpenAI API · Responses 接口',api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录',chatgpt:'Codex 原生订阅 · 开发编码'}[auth.policy];
+    const authPolicy={responses_api:'OpenAI API · Responses 接口',responses_then_subscription:'OpenAI API 优先 · Codex 订阅兜底',api_then_subscription:'API 优先 · 订阅兜底',api_key:'GPT API 优先',inherit:'使用本机 Codex 登录',chatgpt:'Codex 原生订阅 · 开发编码'}[auth.policy];
     const authTiming=s.attempt_finished?'上次走 ':'当前走 ';
-    const authLabel=auth.current==='chatgpt'?authTiming+'Codex 订阅'+(auth.fallback?' · API 额度耗尽':''):
+    const authLabel=auth.current==='chatgpt'?authTiming+'Codex 订阅'+(auth.fallback?' · API 不可用后接管':''):
       auth.current==='responses_api'?authTiming+'OpenAI API':auth.current==='api_key'?authTiming+'GPT API':authPolicy;
     const apiProgress=data.api_review;
     const reviewRounds=auth.current==='responses_api'&&Number.isInteger(apiProgress?.completed_response_rounds)?' · 已完成 '+apiProgress.completed_response_rounds+' 轮审核':'';
-    const apiState=apiProgress?.api_status==='failed'?' · 等待重试':apiProgress?.api_status==='completed'?' · 本次已结束':'';
+    const apiState=apiProgress?.fallback_pending?' · 正在切换至 Codex 订阅':apiProgress?.api_status==='failed'?' · 等待重试':apiProgress?.api_status==='completed'?' · 本次已结束':'';
     $('codex-auth').hidden=!authLabel;text('codex-auth',(authLabel||'')+reviewRounds+(reviewRounds?apiState:''));
     $('codex-auth').title=reviewRounds&&apiProgress.last_receipt_time?'最近回执 · '+dateTime(apiProgress.last_receipt_time,true):'';
     const b=data.burst,burstEnded=!!b&&['completed','done'].includes(str(b.status).toLowerCase());$('burst').hidden=!b||(burstEnded&&!waitingWithoutOperation);

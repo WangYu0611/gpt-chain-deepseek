@@ -14,7 +14,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .config import codex_role_settings
+from .config import codex_role_settings, validate_model_settings
 from .providers import REVIEW_SCHEMA, ProviderError, _atomic_json, _codex_api_keys, _strict_json, validate_output
 from .review_evidence import ReviewEvidence
 from .network import proxy_handler
@@ -34,9 +34,11 @@ _HEAD = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _PERMANENT_CODES = {
     "insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached", "billing_not_active",
     "organization_spend_limit_exceeded", "organization_usage_limit_exceeded", "project_spend_limit_exceeded",
-    "invalid_api_key", "account_deactivated", "permission_denied",
+    "invalid_api_key", "account_deactivated", "permission_denied", "codex_byok_restricted_by_api_credit_promo",
 }
 _RETRY_REASONS = {"rate_limited", "server_unavailable", "transport"}
+_CAPABILITY_PARAMETERS = {"model", "reasoning.effort"}
+_MAX_PROCESS_BYTES = 1024 * 1024
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -45,8 +47,10 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class _RequestFailure(Exception):
-    def __init__(self, *, status=None, code=None, reason=None, retry_after=None, timed_out=False, transport=None):
+    def __init__(self, *, status=None, code=None, parameter=None, reason=None, retry_after=None, timed_out=False,
+                 transport=None):
         self.status, self.code, self.reason = status, code, reason
+        self.parameter = parameter
         self.retry_after, self.timed_out = retry_after, timed_out
         self.transport = transport or {}
 
@@ -124,12 +128,16 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
             raise _OutputLimit("API review response exceeded its size limit")
         return _strict_json(raw.decode("utf-8-sig")), _hash(raw)
     except HTTPError as error:
-        code = None
+        code, parameter = None, None
         try:
             body = _strict_json(error.read(65537).decode("utf-8-sig"))
-            candidate = body.get("error", {}).get("code")
+            detail = body.get("error", {})
+            candidate = detail.get("code")
             if isinstance(candidate, str) and re.fullmatch(r"[a-z_]{1,80}", candidate):
                 code = candidate
+            candidate = detail.get("param")
+            if isinstance(candidate, str) and candidate in _CAPABILITY_PARAMETERS:
+                parameter = candidate
         except (OSError, ValueError, AttributeError, UnicodeError, RecursionError, http.client.HTTPException):
             pass
         finally:
@@ -137,7 +145,7 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
         reason = None
         if code not in _PERMANENT_CODES:
             reason = "rate_limited" if error.code == 429 else "server_unavailable" if 500 <= error.code <= 599 else None
-        raise _RequestFailure(status=error.code, code=code, reason=reason,
+        raise _RequestFailure(status=error.code, code=code, parameter=parameter, reason=reason,
                               retry_after=_retry_after((error.headers or {}).get("Retry-After"))) from None
     except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, http.client.HTTPException) as error:
         cause = getattr(error, "reason", error)
@@ -156,35 +164,62 @@ def _post(payload, key, endpoint, timeout, *, proxy=None):
         raise ProviderError("API review returned invalid JSON") from None
 
 
-def _request(payload, credentials, endpoint, proxy, deadline, receipt, out, number):
+def _fallback_request_reason(status, code, parameter, reason):
+    if (code in _PERMANENT_CODES or code == "model_not_found" or status in {401, 402, 403} or
+            (status == 429 and reason == "rate_limited") or
+            (status == 400 and code == "invalid_value" and parameter == "reasoning.effort") or
+            (status == 400 and code in {"unsupported_value", "unsupported_parameter"} and
+             parameter in _CAPABILITY_PARAMETERS)):
+        return "credentials_exhausted"
+    if ((status is None and reason == "transport") or
+            (type(status) is int and 500 <= status <= 599 and reason == "server_unavailable")):
+        return "api_unavailable"
+    return None
+
+
+def _request(payload, credentials, endpoint, proxy, deadline, receipt, out, number, *, subscription_fallback=False):
     """Retry an unchanged read-only review request before abandoning its transcript."""
     attempt = 0
+    slot_deadline = deadline
     while True:
         slot, key = credentials[0]
-        attempt += 1
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        now = time.monotonic()
+        if now >= deadline:
             receipt["timed_out"] = True
+            if subscription_fallback:
+                receipt.update(subscription_fallback_reason="api_unavailable", api_request_budget_exhausted=True)
             raise ProviderError("API review exhausted its time budget", interrupted=True)
+        if not attempt and subscription_fallback:
+            # One unresponsive request must not consume the time allocated for later keys.
+            slot_deadline = now + (deadline - now) / len(credentials)
+        attempt += 1
         try:
-            return _post(payload, key, endpoint, remaining, proxy=proxy)
+            return _post(payload, key, endpoint, max(0.001, slot_deadline - now), proxy=proxy)
         except _RequestFailure as error:
             row = {"round": number, "attempt": attempt, "credential_slot": slot, "request_sha256": _hash(payload),
                    "http_status": error.status, "api_error_code": error.code, "retry_reason": error.reason,
                    "transport_exception": error.transport, "at": _now()}
+            if error.parameter is not None:
+                row["api_error_parameter"] = error.parameter
             failures = receipt.setdefault("request_failures", [])
             failures.append(row)
             del failures[:-128]
+            delay = max(REQUEST_BACKOFF[min(attempt - 1, len(REQUEST_BACKOFF) - 1)], error.retry_after or 0)
+            last_attempt = (not error.reason or error.code in _PERMANENT_CODES or attempt >= REQUEST_ATTEMPTS or
+                            delay > 30 or time.monotonic() + delay >= slot_deadline)
+            failure_reason = _fallback_request_reason(error.status, error.code, error.parameter, error.reason)
+            rotate = last_attempt and (failure_reason == "credentials_exhausted" or
+                                       (subscription_fallback and failure_reason == "api_unavailable"))
+            if subscription_fallback and rotate:
+                receipt.setdefault("unavailable_credentials", []).append(row)
             _save(out / "process.json", receipt)
-            if len(credentials) > 1 and (
-                    error.code in _PERMANENT_CODES or error.code == "model_not_found" or
-                    error.status in {401, 403} or (error.reason == "rate_limited" and attempt >= REQUEST_ATTEMPTS)):
+            if rotate and len(credentials) > 1:
                 credentials.pop(0)
                 attempt = 0
                 continue
-            delay = max(REQUEST_BACKOFF[min(attempt - 1, len(REQUEST_BACKOFF) - 1)], error.retry_after or 0)
-            if (not error.reason or error.code in _PERMANENT_CODES or attempt == REQUEST_ATTEMPTS or
-                    delay > 30 or time.monotonic() + delay >= deadline):
+            if last_attempt:
+                if subscription_fallback and rotate:
+                    receipt["subscription_fallback_reason"] = failure_reason
                 raise
             time.sleep(delay)
 
@@ -291,7 +326,7 @@ def _resume(source, out, initial, receipt, evidence, settings, secrets, deadline
     source = Path(source).resolve()
     if source == out or classify_failure(source) is None:
         raise ValueError("API review resume source is not a failed transient attempt")
-    previous, process_hash = _read(source / "process.json", 1024 * 1024)
+    previous, process_hash = _read(source / "process.json", _MAX_PROCESS_BYTES)
     seed, seed_hash = _read(source / "request.json", MAX_TRANSCRIPT_BYTES)
     schema, _ = _read(source / "schema.json")
     fields = ("head_sha", "model", "reasoning_effort", "requires_image", "workspace")
@@ -345,7 +380,7 @@ def _resume(source, out, initial, receipt, evidence, settings, secrets, deadline
         if total > MAX_TRANSCRIPT_BYTES:
             raise _OutputLimit("API review resume source exceeded its transcript limit")
     evidence.verify()
-    if _read(source / "process.json", 1024 * 1024)[1] != process_hash:
+    if _read(source / "process.json", _MAX_PROCESS_BYTES)[1] != process_hash:
         raise ValueError("API review resume source changed during verification")
     for relative, digest in files:
         path = source / relative
@@ -356,7 +391,7 @@ def _resume(source, out, initial, receipt, evidence, settings, secrets, deadline
         write_text(out / relative, raw.decode("utf-8"))
         if _hash((out / relative).read_bytes()) != digest:
             raise ValueError("API review resume artifact copy is inconsistent")
-    if (_read(source / "process.json", 1024 * 1024)[1] != process_hash or
+    if (_read(source / "process.json", _MAX_PROCESS_BYTES)[1] != process_hash or
             _read(source / "request.json", MAX_TRANSCRIPT_BYTES)[1] != seed_hash):
         raise ValueError("API review resume source changed while its artifacts were copied")
     receipt.update(turns=turns, resume_from=str(source), resumed_rounds=len(turns),
@@ -369,17 +404,20 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
         raise ProviderError("A nonempty API review prompt is required")
     if type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout <= 0:
         raise ProviderError("API review requires a positive time budget")
-    deadline = time.monotonic() + timeout
     out = Path(out).resolve()
     if out.exists() and any(out.iterdir()):
         raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
     settings = dict(config.get("codex", {}))
+    subscription_fallback = settings.get("responses_subscription_fallback") is True
+    started = time.monotonic()
+    deadline = started + timeout
+    request_deadline = started + timeout / 2 if subscription_fallback else deadline
     model, effort = codex_role_settings(config, "review")
     settings.update(model=model, reasoning_effort=effort)
     if not isinstance(model, str) or not model.strip():
         raise ProviderError("API review requires an explicit model")
     keys = _codex_api_keys(config.get("config_path"), secrets_file=config.get("secrets_file"))
-    if not keys:
+    if not keys and not subscription_fallback:
         raise ProviderError("CODEX_API_KEY is required for Responses API review")
     credentials = list(enumerate(keys, 1))
     from .secrets import secret_values
@@ -410,6 +448,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
                "head_sha": head, "model": model, "reasoning_effort": settings.get("reasoning_effort"),
                "requires_image": art_directory is not None, "workspace": str(Path(cwd).resolve()),
                "started_at": _now(), "turns": []}
+    if subscription_fallback:
+        receipt["credential_count"] = len(credentials)
     tools = []
     stored = 0
     initial = {"model": model, "instructions": instructions, "input": transcript, "endpoint": base + "/responses"}
@@ -423,6 +463,10 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
         if resume_from is not None:
             transcript, tools, stored = _resume(resume_from, out, initial, receipt, evidence, settings, secrets, deadline)
             _save(out / "process.json", receipt)
+        if not credentials:
+            evidence.verify()
+            receipt["subscription_fallback_reason"] = "no_credentials"
+            raise ProviderError("CODEX_API_KEY and CODEX_API_KEY_BACKUPS are unavailable for Responses API review")
         for number in range(len(receipt["turns"]) + 1, MAX_ROUNDS + 1):
             evidence.verify()
             remaining = deadline - time.monotonic()
@@ -434,7 +478,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
             if len(payload) > MAX_TRANSCRIPT_BYTES:
                 receipt["output_limit_exceeded"] = True
                 raise ProviderError("API review request exceeded its transcript limit")
-            response, wire_hash = _request(payload, credentials, base + "/responses", proxy, deadline, receipt, out, number)
+            response, wire_hash = _request(payload, credentials, base + "/responses", proxy, request_deadline, receipt, out, number,
+                                           subscription_fallback=subscription_fallback)
             response = _redact(response, secrets, protocol=True)
             response_path = out / "responses" / f"turn-{number:04d}.json"
             response_hash, size = _save(response_path, response)
@@ -503,6 +548,8 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
                        timed_out=error.timed_out, http_status=error.status, api_error_code=error.code)
         if error.transport:
             receipt["transport_exception"] = error.transport
+        if error.parameter is not None:
+            receipt["api_error_parameter"] = error.parameter
         if error.reason:
             receipt["retry_reason"] = error.reason
         if error.retry_after is not None and error.reason:
@@ -523,10 +570,59 @@ def review(config, prompt, cwd, out, timeout, *, art_directory=None, resume_from
         raise ProviderError("API review evidence or local receipt validation failed") from None
 
 
+def subscription_fallback_source(out):
+    """Return the binding of a locally recorded operational failure eligible for native review."""
+    try:
+        receipt, digest = _read(Path(out) / "process.json", _MAX_PROCESS_BYTES)
+        if (type(receipt) is not dict or receipt.get("protocol") != PROTOCOL or receipt.get("kind") != "review" or
+                receipt.get("status") != "failed" or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 1 or
+                receipt.get("output_limit_exceeded") is not False or type(receipt.get("timed_out")) is not bool or
+                not isinstance(receipt.get("finished_at"), str) or not isinstance(receipt.get("head_sha"), str) or
+                not _HEAD.fullmatch(receipt["head_sha"]) or not isinstance(receipt.get("workspace"), str) or
+                not Path(receipt["workspace"]).is_absolute() or type(receipt.get("turns")) is not list):
+            return None
+        model = receipt["model"]
+        effort = receipt["reasoning_effort"]
+        role_settings = {"model": model}
+        if effort is not None:
+            role_settings["reasoning_effort"] = effort
+        validate_model_settings(role_settings, "codex")
+        reason = receipt.get("subscription_fallback_reason")
+        count = receipt.get("credential_count")
+        failures = receipt.get("request_failures", [])
+        unavailable = receipt.get("unavailable_credentials", [])
+        if (type(count) is not int or not 0 <= count <= 17 or type(failures) is not list or
+                type(unavailable) is not list or len(unavailable) > count):
+            return None
+        if reason == "no_credentials":
+            if count or failures or unavailable or receipt["timed_out"] or receipt.get("failure_type") != "ProviderError":
+                return None
+        elif reason == "api_unavailable" and receipt.get("api_request_budget_exhausted") is True:
+            if count == 0 or receipt["timed_out"] is not True or receipt.get("failure_type") != "ProviderError":
+                return None
+        elif reason in {"credentials_exhausted", "api_unavailable"}:
+            fields = ("http_status", "api_error_code", "api_error_parameter", "retry_reason")
+            if (not count or len(unavailable) != count or not failures or unavailable[-1] != failures[-1] or
+                    receipt.get("failure_type") is not None or type(failures[-1]) is not dict or
+                    any(failures[-1].get(field) != receipt.get(field) for field in fields) or
+                    _fallback_request_reason(*(receipt.get(field) for field in fields)) != reason):
+                return None
+            if any(type(row) is not dict or type(row.get("credential_slot")) is not int or row["credential_slot"] != slot or
+                   _fallback_request_reason(*(row.get(field) for field in fields)) is None
+                   for slot, row in enumerate(unavailable, 1)):
+                return None
+        else:
+            return None
+        return {"head_sha": receipt["head_sha"], "workspace": receipt["workspace"], "model": model,
+                "reasoning_effort": effort, "reason": reason, "api_receipt_sha256": digest}
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return None
+
+
 def recover(out):
     out = Path(out).resolve()
     try:
-        receipt, _ = _read(out / "process.json", 1024 * 1024)
+        receipt, _ = _read(out / "process.json", _MAX_PROCESS_BYTES)
         if (type(receipt) is not dict or receipt.get("protocol") != PROTOCOL or receipt.get("kind") != "review" or
                 receipt.get("status") != "completed" or type(receipt.get("exit_code")) is not int or receipt["exit_code"] != 0 or
                 receipt.get("timed_out") is not False or receipt.get("output_limit_exceeded") is not False or
@@ -586,7 +682,7 @@ def recover(out):
 
 def classify_failure(out):
     try:
-        receipt, _ = _read(Path(out) / "process.json", 1024 * 1024)
+        receipt, _ = _read(Path(out) / "process.json", _MAX_PROCESS_BYTES)
         if (type(receipt) is not dict or receipt.get("protocol") != PROTOCOL or receipt.get("kind") != "review" or
                 receipt.get("status") != "failed" or type(receipt.get("exit_code")) is not int or receipt["exit_code"] == 0 or
                 receipt.get("transient") is not True or receipt.get("retry_reason") not in _RETRY_REASONS or

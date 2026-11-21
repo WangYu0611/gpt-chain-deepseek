@@ -382,11 +382,18 @@ def codex_result_directory(kind: str, out: Path) -> Path:
         return out
     fallback = out / _CODEX_SUBSCRIPTION_DIR
     try:
-        if fallback.is_symlink() or fallback.resolve() != fallback:
+        if fallback.is_symlink() or _reparse(fallback) or fallback.resolve() != fallback:
             return out
         record = _json_file(fallback / "process.json", 16384)
-        if (type(record) is dict and record.get("kind") == kind and record.get("codex_auth_mode") == "chatgpt" and
-                _codex_api_quota_failed(kind, out)):
+        if (type(record) is not dict or record.get("kind") != kind or
+                record.get("codex_auth_mode") != "chatgpt"):
+            return out
+        if "responses_fallback_source" in record:
+            from . import api_review
+            source = api_review.subscription_fallback_source(out) if kind == "review" else None
+            if source is not None and record["responses_fallback_source"] == source:
+                return fallback
+        elif _codex_api_quota_failed(kind, out):
             return fallback
     except (OSError, UnicodeError, ValueError, RuntimeError):
         pass
@@ -860,15 +867,25 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
     """
     if kind not in {"code", "plan", "review", "art_diagnose"}:
         return None
-    direct = _responses_api_receipt(out)
-    if direct is not None:
-        if kind != "review" or direct.get("kind") != "review":
-            return None
-        from . import api_review
-        return api_review.classify_failure(out)
     try:
-        out = claude_result_directory(kind, Path(out))
-        out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out)
+        managed_out = Path(out).resolve()
+        direct = _responses_api_receipt(managed_out)
+        if direct is not None:
+            if kind != "review" or direct.get("kind") != "review":
+                return None
+            out = managed_out
+            if (out / _CODEX_SUBSCRIPTION_DIR / "process.json").is_file():
+                out = codex_result_directory(kind, out)
+            if out == managed_out:
+                from . import api_review
+                if api_review.subscription_fallback_source(out) is not None:
+                    return None  # An interrupted fallback can use a fresh run without waiting for an API retry.
+                return api_review.classify_failure(out)
+        else:
+            selected = claude_result_directory(kind, managed_out)
+            out = codex_result_directory(kind, selected) if kind in {"plan", "review"} else selected
+        codex_fallback = (out.name == _CODEX_SUBSCRIPTION_DIR and
+                          (out.parent == managed_out or codex_result_directory(kind, out.parent) == out))
         path = out / "process.json"
         if path.is_symlink():
             return None
@@ -890,8 +907,7 @@ def classify_transient_failure(kind: str, out: Path) -> dict | None:
         # route. An unrelated child directory cannot supply retry evidence.
         codex_code = kind == "code" and record.get("coding_provider") == "codex" and record.get("coding_protocol") == "codex_exec_v1"
         dsh_code = kind == "code" and not codex_code
-        subscription_fallback = codex_code or (kind in {"plan", "review"} and record.get("codex_auth_mode") == "chatgpt" and
-                                 out.name == _CODEX_SUBSCRIPTION_DIR and _codex_api_quota_failed(kind, out.parent))
+        subscription_fallback = codex_code or codex_fallback
         events, skipped, session = _failure_events(out / "stdout.log", "review" if codex_code else kind)
         stderr = _failure_tail(out / "stderr.log", _FAILURE_STDERR_LIMIT)[0].decode("utf-8-sig")
         if _PERMANENT_FAILURE.search(stderr):
@@ -2252,17 +2268,39 @@ class AgentProviders:
             raise ProviderError(str(error)) from error
         if settings.get("sandbox", "read-only") != "read-only":
             raise ProviderError("API reviewer requires read-only access")
+        fallback_enabled = settings.get("responses_subscription_fallback") is True
+        out = Path(out).resolve()
+        if fallback_enabled and out.exists() and any(out.iterdir()):
+            raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
+        api_prompt = prompt
         if settings.get("review_instructions"):
-            prompt += "\n" + str(settings["review_instructions"])
+            api_prompt += "\n" + str(settings["review_instructions"])
         art_directory = _codex_art_review_directory(self.config, Path(cwd), Path(out).resolve())
         from . import api_review
         options = {"art_directory": art_directory}
         if resume_from is not None:
             options["resume_from"] = resume_from
-        return api_review.review(self.config, prompt, cwd, out, timeout, **options)
+        deadline = time.monotonic() + timeout
+        try:
+            return api_review.review(self.config, api_prompt, cwd, out, timeout, **options)
+        except ProviderError:
+            if not fallback_enabled:
+                raise
+            source = api_review.subscription_fallback_source(out)
+            if source is None:
+                raise
+        from . import gitops
+        if source["workspace"] != str(Path(cwd).resolve()) or source["head_sha"] != gitops.head(Path(cwd)):
+            raise ProviderError("Saved API fallback evidence differs from the current review workspace or HEAD")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderError("No time remains for Codex subscription review", interrupted=True)
+        _, effort = codex_role_settings(self.config, "review")
+        return self._codex("review", prompt, cwd, out, remaining, model=source["model"],
+                           reasoning_effort=effort, responses_fallback_source=source)
 
     def _codex(self, kind: str, prompt: str, cwd: Path, out: Path, timeout: float, *,
-               model=None, reasoning_effort=None, tiered=False) -> dict:
+               model=None, reasoning_effort=None, tiered=False, responses_fallback_source: dict | None = None) -> dict:
         settings = dict(self.config.get("codex", {}))
         default_model, default_effort = codex_role_settings(self.config, kind)
         settings.update({key: value for key, value in (("model", model or default_model),
@@ -2287,18 +2325,29 @@ class AgentProviders:
                        "不得修改产物、配置或主项目。此次验收不能代替用户视觉批准。\n")
         deadline = time.monotonic() + timeout
         auth_mode = settings.get(kind + "_auth_mode", settings.get("auth_mode"))
+        attempt_out = out
+        if responses_fallback_source is not None:
+            attempt_out = out / _CODEX_SUBSCRIPTION_DIR
+            if attempt_out.exists() or attempt_out.is_symlink() or _reparse(attempt_out) or attempt_out.resolve() != attempt_out:
+                raise ProviderError("Subscription review directory is already used; recover it or allocate a new attempt")
+            auth_mode = "chatgpt"
         fallback = auth_mode == "api_key" and settings.get("subscription_fallback") is True
         if fallback and any((out / name).exists() for name in (
                 "stdout.log", "stderr.log", "process.json", "result.json", "final.json", _CODEX_SUBSCRIPTION_DIR)):
             raise ProviderError("Invocation directory is already used; recover it or allocate a new attempt")
         try:
-            self._codex_attempt(kind, prompt, cwd, out, deadline, command, sandbox, settings,
-                                auth_mode, subscription_fallback=fallback, art_directory=art_directory)
+            self._codex_attempt(kind, prompt, cwd, attempt_out, deadline, command, sandbox, settings, auth_mode,
+                                subscription_fallback=fallback, art_directory=art_directory,
+                                responses_fallback_source=responses_fallback_source)
         except ProviderError:
             if not fallback or not _codex_api_quota_failed(kind, out):
                 raise
             self._codex_attempt(kind, prompt, cwd, out / _CODEX_SUBSCRIPTION_DIR, deadline,
                                 command, sandbox, settings, "chatgpt", art_directory=art_directory)
+        if responses_fallback_source is not None:
+            from . import gitops
+            if gitops.head(Path(cwd)) != responses_fallback_source["head_sha"]:
+                raise ProviderError("Workspace HEAD changed during Codex subscription review")
         recovered = self.recover(kind, out)
         if recovered is None:
             raise ProviderError("Codex completed without a durable structured result")
@@ -2307,7 +2356,8 @@ class AgentProviders:
 
     def _codex_attempt(self, kind: str, prompt: str, cwd: Path, out: Path, deadline: float,
                        command: list[str], sandbox: str, settings: dict, auth_mode: str | None,
-                       *, subscription_fallback: bool = False, art_directory: Path | None = None) -> None:
+                       *, subscription_fallback: bool = False, art_directory: Path | None = None,
+                       responses_fallback_source: dict | None = None) -> None:
         out.mkdir(parents=True, exist_ok=True)
         schema = REVIEW_SCHEMA
         if kind == "plan":
@@ -2362,6 +2412,7 @@ class AgentProviders:
             raise ProviderError("Codex exhausted its time budget before the request", interrupted=True)
         self._invoke(kind, argv, prompt, Path(cwd), out, remaining, environment,
                      codex_auth_mode=auth_mode, codex_subscription_fallback=subscription_fallback,
+                     responses_fallback_source=responses_fallback_source,
                      review_read_only_dirs=[str(art_directory)] if art_directory is not None else None)
 
     @staticmethod
@@ -2893,6 +2944,7 @@ class AgentProviders:
                 followup_binding: dict | None = None,
                 codex_auth_mode: str | None = None,
                 codex_subscription_fallback: bool = False,
+                responses_fallback_source: dict | None = None,
                 claude_auth_mode: str | None = None, claude_subscription_fallback: bool = False,
                 claude_api_provider: str | None = None, claude_fallback_source: dict | None = None,
                 coding_protocol: str | None = None, coding_sandbox: str | None = None,
@@ -2953,6 +3005,8 @@ class AgentProviders:
         claude = _claude_receipt(kind, receipt_fields)
         if codex_auth_mode is not None:
             receipt_fields["codex_auth_mode"] = codex_auth_mode
+        if responses_fallback_source is not None:
+            receipt_fields["responses_fallback_source"] = responses_fallback_source
         try:
             capture_limit = int(self.config.get("max_output_bytes", _DEFAULT_PROVIDER_OUTPUT_LIMIT))
             capture_options = {}
@@ -3056,25 +3110,31 @@ class AgentProviders:
 
     def recover(self, kind: str, out: Path) -> dict | None:
         managed_out = Path(out).resolve()
-        try:
-            selected = claude_result_directory(kind, managed_out)
-        except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
-            raise ProviderError("Saved Claude fallback evidence is invalid") from error
+        direct = _responses_api_receipt(managed_out)
+        if direct is not None:
+            if kind != "review" or direct.get("kind") != "review":
+                raise ProviderError("Saved API reviewer stage differs from the requested stage")
+            selected = managed_out
+            if (selected / _CODEX_SUBSCRIPTION_DIR / "process.json").is_file():
+                selected = codex_result_directory(kind, selected)
+            if selected == managed_out:
+                from . import api_review
+                return api_review.recover(selected)
+        else:
+            try:
+                selected = claude_result_directory(kind, managed_out)
+            except (OSError, UnicodeError, ValueError, KeyError, TypeError, AttributeError, RecursionError) as error:
+                raise ProviderError("Saved Claude fallback evidence is invalid") from error
+            if kind in {"plan", "review"}:
+                selected = codex_result_directory(kind, selected)
         result = self._recover(kind, selected, managed_out=managed_out)
         if result is not None and selected != managed_out and (managed_out / "result.json").exists():
             if _json_file(managed_out / "result.json") != result:
-                raise ProviderError("Saved Claude fallback result differs from its native receipt")
+                raise ProviderError("Saved fallback result differs from its native receipt")
         return result
 
     def _recover(self, kind: str, out: Path, *, managed_out: Path) -> dict | None:
         """Validate existing process/protocol artifacts without issuing a request."""
-        direct = _responses_api_receipt(out)
-        if direct is not None:
-            if kind != "review" or direct.get("kind") != "review":
-                raise ProviderError("Saved API reviewer stage differs from the requested stage")
-            from . import api_review
-            return api_review.recover(out)
-        out = codex_result_directory(kind, out) if kind in {"plan", "review"} else Path(out).resolve()
         if not (out / "process.json").is_file():
             return None
         try:
@@ -3151,6 +3211,13 @@ class AgentProviders:
                     return None
                 parse_codex_events(out / "stdout.log", exit_code=record["exit_code"])
                 result = validate_output(kind, _json_file(out / "final.json"))
+                if "responses_fallback_source" in record:
+                    from . import api_review
+                    source = api_review.subscription_fallback_source(managed_out)
+                    if (kind != "review" or out != managed_out / _CODEX_SUBSCRIPTION_DIR or
+                            record.get("codex_auth_mode") != "chatgpt" or source is None or
+                            record["responses_fallback_source"] != source or result["head_sha"] != source["head_sha"]):
+                        raise ProviderError("Saved subscription review differs from its API failure binding")
             elif kind == "code":
                 if not (out / "stdout.log").is_file():
                     return None

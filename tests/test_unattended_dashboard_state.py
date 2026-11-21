@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from unattended import dashboard_state as dashboard
+from unattended.api_review import subscription_fallback_source
 from unattended.background import OWNER
 from unattended.config import load_config
 
@@ -185,6 +186,63 @@ class DashboardStateTests(unittest.TestCase):
         self.assertEqual(self.snapshot()["api_review"]["completed_response_rounds"], 1)
         self.state["operation"]["head_sha"] = "c" * 40
         self.assertIsNone(self.snapshot()["api_review"])
+
+    def test_responses_fallback_follows_only_the_bound_subscription_attempt(self):
+        self.config["codex"].update(review_transport="responses_api", responses_subscription_fallback=True)
+        self.write(self.config_path, self.config)
+        head = "a" * 40
+        self.state.update(phase="REVIEW", task={"id": "TASK-1", "candidate": {"head_sha": head}})
+        directory = self.logs([], kind="review")
+        self.state["operation"].update(task_id="TASK-1", head_sha=head)
+        self.assertEqual(self.snapshot()["codex_auth"], {
+            "policy": "responses_then_subscription", "current": None, "fallback": False})
+
+        observed = self.now.timestamp() - 30
+        path = directory / "process.json"
+        self.write(path, {
+            "protocol": "openai_responses_v1", "kind": "review", "status": "failed", "exit_code": 1,
+            "head_sha": head, "workspace": self.config["project_path"], "model": "gpt-6.2-astra", "reasoning_effort": "high",
+            "timed_out": False, "output_limit_exceeded": False, "finished_at": self.now.isoformat(), "turns": [],
+            "failure_type": "ProviderError", "subscription_fallback_reason": "no_credentials", "credential_count": 0,
+        })
+        os.utime(path, (observed, observed))
+        source = subscription_fallback_source(directory)
+        self.assertIsNotNone(source)
+        child = directory / "codex-subscription"
+        self.write(child / "schema.json", {})
+        result = self.snapshot()
+        self.assertEqual(result["codex_auth"]["current"], "responses_api")
+        self.assertTrue(result["api_review"]["fallback_pending"])
+        self.assertIn("正在切换至 Codex 订阅", result["activity"][0]["text"])
+        self.assertFalse(result["status"]["attempt_finished"])
+
+        stdout = child / "stdout.log"
+        opening = '{"type":"thread.started","thread_id":"thread-subscription"}\n{"type":"turn.started"}'
+        stdout.write_text(opening + "\n", encoding="utf-8")
+        os.utime(stdout, (observed - 1, observed - 1))
+        self.assertEqual(self.snapshot()["codex_auth"]["current"], "responses_api")
+        stdout.write_text(opening, encoding="utf-8")
+        os.utime(stdout, (observed + 1, observed + 1))
+        self.assertEqual(self.snapshot()["codex_auth"]["current"], "responses_api")
+        stdout.write_text(opening + '\n{"type":"item.completed","item":{"type":"agent_message","text":"订阅核验进度"}}\n',
+                          encoding="utf-8")
+        result = self.snapshot()
+        self.assertEqual(result["codex_auth"], {"policy": "responses_then_subscription", "current": "chatgpt", "fallback": True})
+        self.assertIsNone(result["api_review"])
+        self.assertEqual([entry["text"] for entry in result["activity"]], ["开始本轮执行", "订阅核验进度"])
+        self.assertFalse(result["status"]["attempt_finished"])
+
+        receipt = child / "process.json"
+        native = {"kind": "review", "codex_auth_mode": "chatgpt", "exit_code": 0}
+        self.write(receipt, dict(native, responses_fallback_source=dict(source, api_receipt_sha256="b" * 64)))
+        self.assertEqual(self.snapshot()["codex_auth"]["current"], "responses_api")
+        self.write(receipt, dict(native, responses_fallback_source=source))
+        os.utime(receipt, (observed + 20, observed + 20))
+        result = self.snapshot()
+        self.assertEqual(result["codex_auth"]["current"], "chatgpt")
+        self.assertTrue(result["status"]["attempt_finished"])
+        self.assertEqual(result["status"]["elapsed_seconds"], 290)
+        self.assertNotIn(source["api_receipt_sha256"], json.dumps(result))
 
     def test_failed_direct_api_progress_preserves_provider_wait_and_next_retry(self):
         self.config["codex"].update(review_transport="responses_api", auth_mode="api_key")

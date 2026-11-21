@@ -156,7 +156,7 @@ def _diagnosis_model(runtime, directory, operation, task, receipt):
 
 def _art_operation(cfg, state, owned):
     """Read only current-run metadata; never scan an arbitrary or historical log."""
-    from .dashboard_state import _claude_directory, _codex_route, _operation_model, _task_session
+    from .dashboard_state import _attempt_finished_at, _claude_directory, _codex_route, _operation_model, _task_session
     if not owned:
         return None, None, False
     operation, task = state["operation"], state["task"]
@@ -164,7 +164,10 @@ def _art_operation(cfg, state, owned):
     try:
         directory = _confined(runtime / "runs", Path(operation["output_dir"]))
         if operation["kind"] == "review":
-            _, directory = _codex_route(runtime, directory, "review")
+            route, directory, responses_fallback = _codex_route(runtime, directory, "review", head_sha=operation.get("head_sha"))
+            finished = _attempt_finished_at(runtime, directory, operation, None, _iso(operation.get("started_at")),
+                                            state.get("updated_at"), responses_fallback_pending=responses_fallback and route == "responses_api")
+            return None, None, finished is not None
         elif operation["kind"] in {"code", "art_diagnose"} and cfg.get("coding_provider") != "codex":
             directory = _claude_directory(runtime, directory, operation["kind"])
         receipt = _object(_confined(runtime, directory / "process.json"), missing={}, maximum=16384)

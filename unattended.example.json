@@ -47,8 +47,8 @@
     "tiered_planning": true,
     "auth_mode": "chatgpt",
     "windows_sandbox": "unelevated",
-    "review_transport": "codex",
-    "review_transport_after_effort_change": "responses_api",
+    "review_transport": "responses_api",
+    "responses_subscription_fallback": true,
     "sandbox": "read-only"
   }
 }

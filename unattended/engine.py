@@ -867,6 +867,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         state["operation"] = None
 
     def _review_resume_source(self, state, operation, work):
+        from .api_review import subscription_fallback_source
         from .ue_checks import _safe_under
         if (codex_review_transport(self.config, now=self.now()) != "responses_api" or
                 state["phase"] not in {"REVIEW", "MILESTONE_REVIEW", "ART_REVIEW"} or
@@ -887,6 +888,9 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
             if source.parent != runtime / "runs" or not re.fullmatch(r"review-[a-f0-9]{32}", source.name):
                 raise RuntimeError("API review continuation source escaped its managed runs.")
             source = _safe_under(runtime, Path("runs") / source.name)
+            if (self.config.get("codex", {}).get("responses_subscription_fallback") is True and
+                    subscription_fallback_source(source) is not None):
+                return None
             record = _responses_api_receipt(source)
             if (record is not None and record.get("kind") == "review" and record.get("status") == "failed"
                     and type(record.get("exit_code")) is int and record["exit_code"] != 0
