@@ -343,8 +343,8 @@ def validate_request(request: dict, task_id: str, head_sha: str) -> dict:
         if type(test) is not dict or set(test) != {"name", "mode"}:
             raise ValidationError("A test may contain only name and mode")
         name, mode = _validate_test_name(test["name"]), test["mode"]
-        if not isinstance(mode, str) or mode not in {"nullrhi", "normal"}:
-            raise ValidationError("Test mode must be nullrhi or normal")
+        if not isinstance(mode, str) or mode not in {"nullrhi", "normal", "normal_cmd"}:
+            raise ValidationError("Test mode must be nullrhi, normal, or normal_cmd")
         key = (name, mode)
         if key in seen:
             raise ValidationError("Duplicate test request")
@@ -499,7 +499,7 @@ def _project(workspace: Path) -> Path:
 
 
 def _command(binaries: Path, project: Path, test: dict, log: Path, *, milestone_regression=False, batch_names=None) -> list[str]:
-    executable = "UnrealEditor-Cmd.exe" if test["mode"] == "nullrhi" else "UnrealEditor.exe"
+    executable = "UnrealEditor.exe" if test["mode"] == "normal" else "UnrealEditor-Cmd.exe"
     selector = _MILESTONE_SELECTOR if milestone_regression else _test_selector(test["name"])
     if batch_names is not None:
         selector = "+".join(_test_selector(name) for name in batch_names)
@@ -723,7 +723,7 @@ def run_validation(runtime: Path, workspace: Path, engine: Path, *, runner=None,
             artifact["freshness"] = "created" if old is None else "rewritten"
             receipt["artifacts"].append(artifact)
         # No screenshot-content claim is made by timestamps or PNG dimensions.
-        receipt["normal_rhi_requested"] = any(test["mode"] == "normal" for test in request["tests"])
+        receipt["normal_rhi_requested"] = any(test["mode"] != "nullrhi" for test in request["tests"])
         receipt["visual_review_required"] = receipt["normal_rhi_requested"] and bool(receipt["artifacts"])
         receipt["evidence_scope"] = ("automation_with_fresh_artifacts_for_review" if receipt["artifacts"] else
                                      "automation_only_no_graphical_claim")

@@ -1587,7 +1587,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "\nUE 正式构建和运行由提交后的独立 CHECK 执行。编码阶段准备实现、测试和验证清单，"
                 "并读取已留存的 CHECK 回执定位返工原因。不要在 Codex 沙箱内启动 UnrealBuildTool、"
                 "Build.bat、打包工具或引擎进程。需采集正常 RHI 画面时，"
-                "把具有离屏采集逻辑的自动化用例及其产物列入最终 HEAD 的验证清单，并据实标记待 CHECK。\n")
+                "在最终 HEAD 的验证清单中以 normal_cmd 运行离屏用例并声明产物，"
+                "由 CHECK 固定使用 UnrealEditor-Cmd.exe 配合 D3D12 执行，据实标记待 CHECK。\n")
         if task.get("code_resume") and task.get("code_failures"):
             prompt += (
                 f"\n执行器交付检查反馈：上次 {coder_name} 协议轮已结束，但相对 "

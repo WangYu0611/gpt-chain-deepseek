@@ -300,14 +300,15 @@ class BridgeTests(unittest.TestCase):
 
     def test_fixed_native_commands_modes_timeouts_and_immutable_receipt(self):
         self.request["tests"].append({"name": "ZhuGuoCity.Local.VisualStage", "mode": "normal"})
+        self.request["tests"].append({"name": "ZhuGuoCity.Local.CmdVisualStage", "mode": "normal_cmd"})
         write_json(self.manifest, self.request)
         result = self.run_bridge()
         self.assertEqual(result["status"], "passed")
-        self.assertEqual(len(self.runner.calls), 2)
+        self.assertEqual(len(self.runner.calls), 3)
         for index, (argv, kwargs) in enumerate(self.runner.calls):
-            self.assertEqual(Path(argv[0]).name, "UnrealEditor-Cmd.exe" if index == 0 else "UnrealEditor.exe")
+            self.assertEqual(Path(argv[0]).name, "UnrealEditor.exe" if index == 1 else "UnrealEditor-Cmd.exe")
             self.assertEqual("-nullrhi" in argv, index == 0)
-            self.assertEqual("-d3d12" in argv, index == 1)
+            self.assertEqual("-d3d12" in argv, index != 0)
             self.assertIn("-RenderOffScreen", argv)
             self.assertNotIn("-windowed", argv)
             self.assertEqual(kwargs["timeout_seconds"], TEST_TIMEOUT_SECONDS)
@@ -646,7 +647,7 @@ class BridgeTests(unittest.TestCase):
         path = self.artifact()
         path.write_bytes(PNG)
         previous = path.stat().st_mtime_ns
-        self.request["tests"][0]["mode"] = "normal"
+        self.request["tests"][0]["mode"] = "normal_cmd"
         write_json(self.manifest, self.request)
         def effect(argv, kwargs):
             path.write_bytes(PNG)
@@ -664,6 +665,7 @@ class BridgeTests(unittest.TestCase):
         path.write_bytes(PNG + b"later workspace mutation")
         self.assertEqual(backup.read_bytes(), PNG)
         self.assertTrue(result["visual_review_required"])
+        self.assertTrue(result["normal_rhi_requested"])
         self.assertFalse(result["image_content_validated"])
 
     def test_new_artifact_is_archived_and_bad_png_is_rejected(self):
