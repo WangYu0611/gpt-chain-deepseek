@@ -25,6 +25,11 @@ _RETRY_REASONS = {"rate_limited": "服务请求暂时受限", "server_unavailabl
                   "local_cli_unavailable": "本地 Codex 正在更新或暂不可用",
                   "claude_subscription_limit": "Claude Pro 额度已用完",
                   "codex_subscription_limit": "Codex额度已用完"}
+_REVIEW_FALLBACK_LABELS = {
+    "no_credentials": "本轮没有可用的 API 密钥",
+    "credentials_exhausted": "本轮 API 密钥均不可用",
+    "api_unavailable": "API 请求暂不可用",
+}
 SESSION_HEADER_BYTES = 8 * 1024
 CLAUDE_SESSION_HEADER_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
@@ -303,7 +308,8 @@ def _codex_subscription_started(runtime, child, kind, *, responses_source=None):
     stdout = _confined(runtime, child / "stdout.log")
     if receipt is not None:
         return (receipt.get("kind") == kind and receipt.get("codex_auth_mode") == "chatgpt"
-                and type(receipt.get("exit_code")) is int
+                and (type(receipt.get("exit_code")) is int or
+                     responses_source is not None and receipt.get("launch_or_capture_failed") is True)
                 and (responses_source is None or receipt.get("responses_fallback_source") == responses_source))
     if responses_source is not None:
         parent_receipt = _confined(runtime, child.parent / "process.json")
@@ -363,17 +369,25 @@ def _claude_directory(runtime, directory, kind):
     return logical if selected == logical else _confined(logical, selected)
 
 
+def _api_review_receipt(runtime, directory, operation):
+    path = _confined(runtime, directory / "process.json")
+    receipt = _object(path, missing={}, maximum=1024 * 1024)
+    status, exit_code = receipt.get("status"), receipt.get("exit_code")
+    running = status == "running" and exit_code is None
+    finished = type(exit_code) is int and (
+        status == "completed" and exit_code == 0 or status == "failed" and exit_code != 0)
+    if (receipt.get("protocol") != "openai_responses_v1" or receipt.get("kind") != "review"
+            or not (running or finished)
+            or operation.get("head_sha") is not None and receipt.get("head_sha") != operation["head_sha"]):
+        return path, None
+    return path, receipt
+
+
 def _api_review_progress(runtime, directory, operation):
     """Project fixed receipt counters for the currently owned API review."""
     try:
-        path = _confined(runtime, directory / "process.json")
-        receipt = _object(path, missing={}, maximum=1024 * 1024)
-        status = receipt.get("status")
-        running = status == "running" and receipt.get("exit_code") is None
-        finished = status in {"completed", "failed"} and type(receipt.get("exit_code")) is int
-        if (receipt.get("protocol") != "openai_responses_v1" or receipt.get("kind") != "review"
-                or not (running or finished)
-                or operation.get("head_sha") is not None and receipt.get("head_sha") != operation["head_sha"]):
+        path, receipt = _api_review_receipt(runtime, directory, operation)
+        if receipt is None:
             return None
         turns = receipt.get("turns", [])
         if not isinstance(turns, list) or len(turns) > 97:
@@ -391,10 +405,84 @@ def _api_review_progress(runtime, directory, operation):
         resumed = receipt.get("resumed_rounds", 0)
         if type(resumed) is not int or not 0 <= resumed <= completed:
             resumed = 0
-        return {"completed_response_rounds": completed, "resumed_rounds": resumed, "api_status": status,
+        return {"completed_response_rounds": completed, "resumed_rounds": resumed, "api_status": receipt["status"],
                 "last_receipt_time": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()}
     except (OSError, ValueError, RuntimeError, TypeError, RecursionError):
         return None
+
+
+def _review_request_label(row):
+    status, code = row.get("http_status"), row.get("api_error_code")
+    if row.get("api_error_parameter") == "reasoning.effort" and code in ("invalid_value", "unsupported_value", "unsupported_parameter"):
+        return "当前思考档不可用"
+    if code == "model_not_found" or row.get("api_error_parameter") == "model" and code in ("unsupported_value", "unsupported_parameter"):
+        return "当前模型不可用"
+    if status in (401, 403) or code in ("invalid_api_key", "account_deactivated", "permission_denied"):
+        return "密钥无效或缺少调用权限"
+    if status == 402 or code in ("insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached",
+                                 "billing_not_active", "organization_spend_limit_exceeded", "organization_usage_limit_exceeded",
+                                 "project_spend_limit_exceeded", "codex_byok_restricted_by_api_credit_promo"):
+        return "API 额度或套餐不可用"
+    if status == 429:
+        return "API 请求暂时受限"
+    reason = row.get("retry_reason")
+    return _RETRY_REASONS.get(reason) if isinstance(reason, str) and reason in ("rate_limited", "server_unavailable", "transport") else None
+
+
+def _review_route_attempt(runtime, directory, operation, selected, *, worker_active):
+    """Project anonymous credential slots and the authenticated native attempt."""
+    try:
+        _, receipt = _api_review_receipt(runtime, directory, operation)
+        if receipt is None:
+            return {}
+        mode, transcript, fallback = selected
+        status = receipt["status"]
+        count = receipt.get("credential_count")
+        count = count if type(count) is int and 0 <= count <= 17 else 0
+        failures = receipt.get("request_failures", [])
+        failures = failures if type(failures) is list and len(failures) <= 128 else []
+        slots = {index: {"slot": index, "status": "waiting", "failed_requests": 0, "failure_label": None}
+                 for index in range(1, count + 1)}
+        for row in failures:
+            if type(row) is not dict or type(row.get("credential_slot")) is not int or row["credential_slot"] not in slots:
+                continue
+            slot = slots[row["credential_slot"]]
+            slot["failed_requests"] += 1
+            slot["failure_label"] = _review_request_label(row)
+        unavailable = receipt.get("unavailable_credentials", [])
+        if type(unavailable) is not list or len(unavailable) > count:
+            unavailable = []
+        next_slot = 1
+        for row in unavailable:
+            if type(row) is not dict or type(row.get("credential_slot")) is not int or row["credential_slot"] != next_slot:
+                break
+            slots[next_slot].update(status="failed", failure_label=_review_request_label(row))
+            next_slot += 1
+        if next_slot in slots:
+            slot = slots[next_slot]
+            if status == "running" and worker_active:
+                slot["status"] = "running"
+            elif status == "completed":
+                slot.update(status="completed", failure_label=None)
+            elif status == "failed" and slot["failed_requests"]:
+                slot["status"] = "failed"
+        reason = receipt.get("subscription_fallback_reason") if fallback else None
+        reason = reason if isinstance(reason, str) and reason in _REVIEW_FALLBACK_LABELS else None
+        label = _REVIEW_FALLBACK_LABELS.get(reason) or (_review_request_label(receipt) if status == "failed" else None)
+        attempt = {"head_sha": operation["head_sha"], "api_status": status if status != "running" or worker_active else "waiting",
+                   "fallback_reason": reason, "failure_label": label, "slots": list(slots.values())}
+        if fallback and mode == "chatgpt":
+            native = _object(_confined(runtime, transcript / "process.json"), missing=None, maximum=16384)
+            if native is not None:
+                attempt["subscription_status"] = ("completed" if native.get("exit_code") == 0
+                                                   and not any(native.get(key) for key in ("timed_out", "output_limit_exceeded",
+                                                                                           "launch_or_capture_failed"))
+                                                   else "failed")
+            elif worker_active:
+                attempt["subscription_status"] = "running"
+        return attempt
+    except (OSError, ValueError, RuntimeError, TypeError, RecursionError):
+        return {}
 
 
 def _attempt_finished_at(runtime, directory, operation, check_id, started_at, updated_at, *, responses_fallback_pending=False):
@@ -647,6 +735,7 @@ def _empty(now):
             "models": {role: {"name": name, "model": None, "effort": None} for role, name in (("codex", "Codex"), ("dsh", "DSH"))},
             "codex_auth": {"policy": None, "current": None, "fallback": False},
             "api_review": None,
+            "review_route": None,
             "check_progress": {"total": 0, "current_id": None},
             "task": None, "checks": [], "accepted": [], "deferred": [], "activity": [], "burst": None, "provider_retry": None,
             "publication": {"mode": None, "milestone_id": None, "pending_tasks": 0, "summary": ""},
@@ -1090,11 +1179,13 @@ def _workflow(snapshot, config, state, operation, directory=None):
         elif identity == "routine_plan" and source:
             summary = "候选任务已转交关键系统规划。"
         elif identity == "check" and check_rows:
-            summary = f"已记录 {len(check_rows)} / {snapshot['check_progress']['total']} 项检查，{sum(row['passed'] is True for row in check_rows)} 项通过。"
+            passed = sum(row["passed"] is True for row in check_rows)
+            skipped = sum(row.get("status") == "not_run" for row in check_rows)
+            failed = sum(row["passed"] is False and row.get("status") != "not_run" for row in check_rows)
+            summary = (f"已记录 {len(check_rows)} / {snapshot['check_progress']['total']} 项检查，"
+                       f"{passed} 项通过、{failed} 项未通过、{skipped} 项未运行。")
             if previous_checks:
                 summary = "上一轮检查记录 · " + summary + "等待本轮新提交后重新检查。"
-            if checks_failed:
-                summary += "存在未通过的检查。"
         nodes.append({"id": identity, "title": title, "module_id": module_id, "current": identity == current,
                       "optional": identity == "critical_plan", "enabled": enabled, "state": node_state,
                       "state_label": labels[node_state], "model": model, "effort": effort, "model_source": model_source,
@@ -1635,8 +1726,14 @@ def collect_snapshot(config_path: Path) -> dict:
         policy = codex.get("auth_mode", "inherit")
         snapshot["codex_auth"]["policy"] = "api_then_subscription" if codex.get("subscription_fallback") is True else policy
         if codex_review_transport(config, now=now) == "responses_api":
-            snapshot["codex_auth"]["policy"] = ("responses_then_subscription"
-                                                  if codex.get("responses_subscription_fallback") is True else "responses_api")
+            fallback_enabled = codex.get("responses_subscription_fallback") is True
+            snapshot["codex_auth"]["policy"] = "responses_then_subscription" if fallback_enabled else "responses_api"
+            snapshot["review_route"] = {
+                "fallback_enabled": fallback_enabled,
+                "model": _clean(model, 120) or None, "effort": _clean(effort, 40) or None,
+                "api_status": "waiting", "subscription_status": "waiting" if fallback_enabled else None,
+                "fallback_reason": None, "failure_label": None, "slots": [],
+            }
         snapshot["check_progress"]["total"] = len(config["checks"])
         snapshot["worker"] = _worker(runtime, config_path, now)
         state = _object(_confined(runtime, runtime / "state.json"), missing=None)
@@ -1764,10 +1861,16 @@ def collect_snapshot(config_path: Path) -> dict:
         results = check_owner.get("check_results", [])
         if not isinstance(results, list):
             raise ValueError("检查结果结构无效")
-        snapshot["checks"] = [{"id": _clean(row.get("id"), 120), "passed": row.get("passed") if type(row.get("passed")) is bool else None,
-                               "exit_code": row.get("exit_code") if type(row.get("exit_code")) is int else None,
-                               "status": "not_run" if row.get("status") == "NOT_RUN" else None}
-                              for row in results if isinstance(row, dict)]
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            check = {"id": _clean(row.get("id"), 120),
+                     "passed": row.get("passed") if type(row.get("passed")) is bool else None,
+                     "exit_code": row.get("exit_code") if type(row.get("exit_code")) is int else None,
+                     "status": "not_run" if row.get("status") == "NOT_RUN" else None}
+            if check["status"] == "not_run" and row.get("reason") == "editor_build_failed":
+                check["reason"] = "editor_build_failed"
+            snapshot["checks"].append(check)
         for record in accepted[-100:]:
             if not isinstance(record, dict):
                 raise ValueError("已验收任务结构无效")
@@ -1818,10 +1921,23 @@ def collect_snapshot(config_path: Path) -> dict:
             kind == "code" and operation.get("coding_provider") == "codex")
         responses_fallback_pending = False
         if directory and owns_operation and codex_kind and kind == codex_kind and codex_operation:
+            primary = directory
             mode, directory, responses_fallback = _codex_route(runtime, directory, codex_kind, head_sha=operation.get("head_sha"))
-            responses_fallback_pending = (responses_fallback and mode == "responses_api" and phase not in {"BLOCKED", "DONE"}
-                                          and snapshot["worker"]["alive"] and snapshot["worker"]["healthy"])
+            worker_active = phase not in {"BLOCKED", "DONE"} and snapshot["worker"]["alive"] and snapshot["worker"]["healthy"]
+            responses_fallback_pending = responses_fallback and mode == "responses_api" and worker_active
             snapshot["codex_auth"].update(current=mode, fallback=mode == "chatgpt" and directory.name == _CODEX_SUBSCRIPTION_DIR)
+            review_route = snapshot["review_route"]
+            if review_route is not None and codex_kind == "review":
+                review_head = (check_owner if operation_phase == "MILESTONE_REVIEW" else check_owner.get("candidate") or {}).get("head_sha")
+                if (isinstance(review_head, str) and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", review_head)
+                        and operation.get("head_sha") == review_head and operation.get("task_id") == task_id):
+                    attempt = _review_route_attempt(runtime, primary, operation, (mode, directory, responses_fallback),
+                                                    worker_active=worker_active)
+                    if attempt:
+                        review_route.update(attempt)
+                        recorded_model, recorded_effort = _operation_model(runtime, operation, primary)
+                        if recorded_model:
+                            review_route.update(model=recorded_model, effort=recorded_effort)
         elif directory and owns_operation and (
                 kind == "code" and operation.get("coding_provider") == "claude" or
                 kind == "plan" and operation.get("planning_provider") == "claude"):

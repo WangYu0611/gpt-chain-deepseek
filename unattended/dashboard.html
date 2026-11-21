@@ -194,9 +194,85 @@
     .art-rework-latest-images {grid-template-columns:repeat(2,minmax(0,1fr));max-width:780px}.art-rework-latest-images img {height:180px}.art-rework-extra>summary {font-size:12px;color:var(--accent);padding:8px 0}.art-rework-extra[open]>summary {margin-bottom:12px}
     @media(max-width:760px) {.art-reworks {padding:15px}.art-reworks .panel-head {align-items:flex-start;gap:8px}.art-reworks h2 {font-size:16px}.art-rework-round>summary {gap:7px;padding:12px 10px}.art-rework-round>summary .tag {max-width:42%;white-space:normal}.art-rework-round-body {padding:0 11px 13px}.art-rework-images {grid-template-columns:repeat(2,minmax(0,1fr))}.art-rework-meta {gap:4px 12px}.art-rework-lightbox {padding:10px}.art-rework-latest {padding:12px}}
     @media(max-width:760px) {.flows-lane {padding:17px}.flows-lane-head {gap:10px}.flows-current {max-width:43%;font-size:10px}.flows-nodes {grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.flows-node {padding:11px;min-height:205px}.flows-node-title {font-size:13px}.flow-entry {align-items:flex-start;flex-direction:column;gap:4px}.flow-dialog {width:calc(100vw - 20px);max-height:calc(100dvh - 20px);border-radius:11px}.flow-dialog-head {padding:16px}.flow-dialog-body {padding:16px}.flow-evidence-layout {grid-template-columns:1fr;gap:4px}.flow-evidence-items {grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px}.flow-evidence-view {padding:11px}.flow-evidence-text {max-height:40dvh}}
+    /* Live workflow and the two evidence panels share the same status colors. */
+    :root {--bg:#f1f5fa;--ink:#142339;--muted:#56677d;--line:#dbe4ef;--rail:#111e30}
+    body {font-family:"Segoe UI Variable","Segoe UI","Microsoft YaHei",sans-serif}
+    .sidebar {background:linear-gradient(165deg,#172942,var(--rail) 57%);border-right:1px solid #24354b}
+    .brand-mark {background:#29496f;color:#e0ebff;box-shadow:inset 0 0 0 1px #ffffff16}
+    .identity-row>span {white-space:nowrap}
+    .links a[aria-current="page"] {background:#274467;color:#f3f8ff;box-shadow:inset 2px 0 0 #91bbff}
+    .panel {box-shadow:0 2px 4px #19365404,0 8px 26px #19365405}
+    #view-development {--accent:#2859b2;--active:#edf3ff}
+    .dev-focus {background:radial-gradient(ellipse at 95% 0,#294d7b 0,transparent 65%),linear-gradient(120deg,#12233c,#193558);border:1px solid #30517a;box-shadow:0 12px 28px #1836571c}
+    .dev-focus h2 {font-size:24px;letter-spacing:.01em}
+    .dev-focus-side {background:#0b1d3522}
+    .dev-metrics {margin-block:14px 18px}
+    .dev-metric {box-shadow:0 2px 8px #162b4610}
+    .dev-workflow-tools {display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:10px}
+    .dev-workflow-tools a {color:var(--accent);font-size:12px;text-decoration:none}
+    .dev-flow .flow-node {min-height:124px;padding:12px;border-radius:11px}
+    .dev-node-top {justify-content:flex-start}
+    .dev-node-icon {width:25px;height:25px;font-size:14px}
+    .dev-flow .flow-model {min-height:0;line-height:1.45;font-size:11px}
+    .dev-flow .flow-node:not(:last-child):after {top:50%;transform:translateY(-50%);color:#8697ad}
+    .dev-flow .flow-node[data-state="blocked"] .flow-state {color:var(--red)}
+    .dev-flow .flow-node[data-state="blocked"] .flow-state:before,.dev-flow-legend i.blocked {background:#c35b6b}
+    .dev-flow .flow-node[data-state="blocked"] .dev-node-track {background:#e7b3be}
+    .dev-route-row .rework-caption[data-active="true"] {font-weight:600}
+    .review-route {margin-top:18px;padding:18px 22px 20px;background:linear-gradient(165deg,#fff,#f8faff)}
+    .review-route-head {display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:13px}
+    .review-route-head h2 {font-size:17px}
+    .review-route-meta {display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+    .review-route-meta .tag {background:#fff;font-family:Consolas,"Microsoft YaHei",monospace}
+    .review-route-steps {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}
+    .review-route-steps[data-fallback="false"] {grid-template-columns:repeat(2,minmax(0,1fr))}
+    .route-step {position:relative;min-width:0;display:grid;grid-template-columns:27px minmax(0,1fr);gap:9px;padding:11px 13px;border:1px solid #dfe7f2;border-radius:10px;background:#f6f8fc}
+    .route-step:not(:last-child):after {content:"→";position:absolute;right:-17px;top:50%;transform:translateY(-50%);font-size:12px;color:#7a8da8}
+    .route-step[hidden] {display:none}
+    .review-route-steps[data-fallback="false"] .route-step[data-route-step="backups"]:after {content:none}
+    .route-step-mark {display:grid;place-items:center;align-self:start;width:27px;height:27px;border-radius:8px;background:#e9eef6;color:#4f6380;font:600 12px/1 Consolas,monospace}
+    .route-step strong {display:block;font-size:13px;font-weight:650;overflow-wrap:anywhere}
+    .route-step p {margin-top:2px;color:#5b6f89;font-size:11px;overflow-wrap:anywhere}
+    .route-step[data-state="running"] {background:#eaf2ff;border-color:#8cafe5}
+    .route-step[data-state="running"] .route-step-mark {color:white;background:#2859b2}
+    .route-step[data-state="completed"] {background:#eff9f4;border-color:#c4ded3}
+    .route-step[data-state="completed"] .route-step-mark {background:#d7eee2;color:#235e47}
+    .route-step[data-state="failed"] {background:#fff4f3;border-color:#edc9cd}
+    .route-step[data-state="failed"] .route-step-mark {background:#f6dfe2;color:#943948}
+    .route-step[data-state="stale"],.route-step[data-state="not_required"] {background:#f6f8fc;border-color:#dfe7f2}
+    .review-route-note {margin-top:11px;font-size:12px;color:#4b607d}
+    .review-route[data-current="true"] .review-route-note {color:#245299;font-weight:600}
+    .dev-insights {align-items:start}
+    .dev-insights .check-list {gap:8px;margin-top:13px}
+    .dev-insights .check {min-height:64px;gap:5px;border-radius:9px}
+    .dev-insights .check[data-result="skipped"] {background:#faf8f1;border-style:dashed;border-color:#e8ddc3}
+    .check-reason {font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+    .dev-check-cause {margin-top:12px;padding:9px 11px;border-left:3px solid #c35b6b;border-radius:0 7px 7px 0;background:#fff1f1;color:#8e3946;font-size:12px;overflow-wrap:anywhere}
+    .dev-check-cause[data-scope="previous_attempt"] {border-color:#a77c38;background:#fcf6e9;color:#795718}
+    .overview-check-note {margin-top:13px;padding:8px 10px;background:#f6f8fc;border:1px solid #dbe4ef;border-radius:7px;font-size:12px;overflow-wrap:anywhere}
+    .overview-check-note a {color:var(--accent);text-decoration:none;font-weight:600}
+    #dev-check-metric-label[data-state="failed"] {color:var(--red)}
+    #dev-check-metric-label[data-state="previous_attempt"] {color:var(--amber)}
+    @media(max-width:980px) {.dev-insights #checks-panel {order:-1}}
+    @media(max-width:760px) {
+      .dev-focus h2 {font-size:19px}
+      .dev-flow .flow-node {min-height:123px}
+      .dev-workflow-tools {justify-content:flex-end;gap:5px 10px}
+      .review-route {padding:16px}
+      .review-route-steps {gap:15px}
+      .route-step {grid-template-columns:1fr;gap:5px;padding:8px}
+      .route-step:not(:last-child):after {right:-13px}
+    }
+    @media(max-width:440px) {
+      .review-route-steps,.review-route-steps[data-fallback="false"] {grid-template-columns:1fr;gap:7px}
+      .route-step {grid-template-columns:27px minmax(0,1fr);gap:9px;padding:8px 10px}
+      .route-step:not(:last-child):after {content:none}
+      .review-route-meta,.dev-workflow-tools {max-width:55%}
+      .dev-insights .check-list {grid-template-columns:1fr}
+    }
     @media(prefers-reduced-motion:reduce) {* {scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 </style></head><body>
-<div class="app"><aside class="sidebar"><div><div class="brand"><span class="brand-mark" aria-hidden="true">筑</span><span>项目工作台</span></div><div class="brand-caption">Codex × <span id="coder-brand">Claude</span> · 无人值守</div></div>
+<div class="app"><aside class="sidebar"><div><div class="brand"><span class="brand-mark" aria-hidden="true">筑</span><span>项目工作台</span></div><div class="brand-caption"><span id="coder-brand">Codex</span> · 无人值守</div></div>
     <section class="project">
       <div class="eyebrow">当前项目</div>
       <div class="project-name" id="project-name">正在读取项目…</div>
@@ -228,6 +304,7 @@
           <div class="meta-item"><span>最近活动</span><strong id="last-activity">—</strong></div>
           <div class="meta-item"><span>本步骤用时</span><strong id="elapsed">—</strong></div>
         </div>
+        <div class="overview-check-note" id="overview-check-note" hidden><span id="overview-check-text"></span> <a href="#checks-panel">查看独立检查 →</a></div>
         <a class="status-link" href="#development" data-open-view="development">查看开发流程与执行记录 →</a><div class="error-detail" id="status-error"></div><div class="burst" id="burst" hidden></div>
       </section>
       <section class="panel panel-pad next-panel" aria-label="下一步与后台健康">
@@ -252,41 +329,118 @@
     </section>
 </div>
 <div class="view" id="view-development" hidden>
-    <section class="full-flow-test user-repair" id="user-repair-panel" aria-labelledby="user-repair-title" hidden><div class="panel-head"><h2 id="user-repair-title">Opus修复全流程问题</h2><span class="tag" id="user-repair-status"></span></div><p id="user-repair-summary" class="full-flow-summary"></p><div class="full-flow-meta"><span id="user-repair-model"></span><span id="user-repair-stage"></span></div><p id="user-repair-scope" class="full-flow-scope"></p><button id="user-repair-detail" type="button">查看本批授权、日志与产物 →</button></section>
-    <section class="full-flow-test" id="full-flow-test" aria-labelledby="full-flow-title" hidden><div class="panel-head"><div><div class="dev-kicker">独立测试执行</div><h2 id="full-flow-title">Opus全流程测试</h2></div><span class="tag" id="full-flow-status">读取测试状态</span></div><p id="full-flow-summary" class="full-flow-summary"></p><div class="full-flow-meta"><span id="full-flow-model"></span><span id="full-flow-stage"></span><span id="full-flow-updated"></span></div><p id="full-flow-scope" class="full-flow-scope"></p><p id="full-flow-package-short" class="full-flow-retest" hidden></p><p id="full-flow-retest" class="full-flow-retest" hidden></p><button id="full-flow-detail" type="button" data-flow-lane="development" data-flow-node="full_flow_test">查看日志与测试产物 →</button></section>
-    <div class="flow-entry"><span>查看本轮步骤、执行模型、阻塞原因，以及对应日志与产物。</span><a href="#flows" data-open-view="flows">打开模块流程与证据 →</a></div>
+    <div id="dev-priority-evidence" hidden></div>
     <section class="dev-focus" aria-labelledby="dev-task-title">
       <div class="dev-focus-main"><div class="dev-focus-top"><span class="dev-kicker">当前开发任务</span><span id="dev-task-id" class="hash">等待任务</span></div><h2 id="dev-task-title">正在同步开发进度</h2><p id="dev-task-summary">读取本地执行状态…</p><div class="dev-focus-bottom"><span id="dev-state" data-state="idle">等待同步</span><span id="dev-worker-health">后台状态待同步</span><span id="dev-route">规划路径待确认</span><a href="#task-panel">查看任务书 ↗</a></div></div>
       <div class="dev-focus-side"><span class="dev-kicker">当前阶段</span><strong id="dev-stage-name">—</strong><div id="dev-model">执行模型待记录</div><div class="dev-call-time"><span>本次调用用时</span><strong id="dev-elapsed">—</strong></div></div>
     </section>
     <div class="dev-metrics">
-      <div class="dev-metric"><span class="dev-metric-icon">✓</span><div><strong id="dev-check-count">—</strong><span>本轮独立检查通过</span></div></div>
+       <div class="dev-metric"><span class="dev-metric-icon" aria-hidden="true">✓</span><div><strong id="dev-check-count">—</strong><span id="dev-check-metric-label">本轮独立检查通过</span></div></div>
       <div class="dev-metric"><span class="dev-metric-icon amber">↶</span><div><strong id="dev-reworks">—</strong><span>当前任务返工</span></div></div>
       <div class="dev-metric"><span class="dev-metric-icon violet">▤</span><div><strong id="dev-pending-publish">—</strong><span>等待阶段统一发布</span></div></div>
       <div class="dev-metric"><span class="dev-metric-icon teal">◷</span><div><strong id="dev-recent-count">—</strong><span>可查看的验收记录</span></div></div>
     </div>
     <section class="panel workflow-panel" id="workflow-panel" aria-label="任务编排流程">
-      <div class="workflow-top"><div><div class="dev-kicker">任务流水线</div><h2>本轮走到哪一步</h2></div><span class="flow-current" id="flow-current">等待流程数据</span></div>
-      <div class="dev-flow" aria-label="点击阶段查看执行详情"><button class="flow-node" type="button" data-node="routine_plan" data-module="routine_planner" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">01</span><span class="dev-node-icon" aria-hidden="true">S</span></span><span class="flow-title">任务初拟</span><span class="flow-model" data-field="model">Sonnet</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button><button class="flow-node" type="button" data-node="critical_plan" data-module="critical_planner" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">02</span><span class="dev-node-icon" aria-hidden="true">O</span></span><span class="flow-title">关键规划</span><span class="flow-model" data-field="model">Opus · 按需</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button><button class="flow-node" type="button" data-node="code" data-module="developer" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">03</span><span class="dev-node-icon" aria-hidden="true">S</span></span><span class="flow-title">开发实现</span><span class="flow-model" data-field="model">Sonnet</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button><button class="flow-node" type="button" data-node="check" data-module="checks" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">04</span><span class="dev-node-icon" aria-hidden="true">✓</span></span><span class="flow-title">独立检查</span><span class="flow-model" data-field="model">UE / Tests</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button><button class="flow-node" type="button" data-node="review" data-module="reviewer" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">05</span><span class="dev-node-icon" aria-hidden="true">C</span></span><span class="flow-title">独立审核</span><span class="flow-model" data-field="model">Codex</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button><button class="flow-node" type="button" data-node="publish" data-module="publisher" data-state="idle"><span class="dev-node-top"><span class="dev-node-index">06</span><span class="dev-node-icon" aria-hidden="true">↗</span></span><span class="flow-title">登记验收</span><span class="flow-model" data-field="model">System</span><span class="flow-state" data-field="state">等待同步</span><span class="dev-node-track" aria-hidden="true"></span></button></div>
+      <div class="workflow-top">
+        <h2>任务流程</h2>
+        <div class="dev-workflow-tools">
+          <span class="flow-current" id="flow-current">等待流程数据</span>
+          <a href="#flows" data-open-view="flows">查看证据 →</a>
+        </div>
+      </div>
+      <div class="dev-flow" aria-label="点击阶段查看执行详情">
+        <button class="flow-node" type="button" data-node="routine_plan" data-module="routine_planner" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">≡</span></span>
+          <span class="flow-title">常规规划</span>
+          <span class="flow-model" data-field="model">Codex</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+        <button class="flow-node" type="button" data-node="critical_plan" data-module="critical_planner" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">◇</span></span>
+          <span class="flow-title">关键规划</span>
+          <span class="flow-model" data-field="model">按需进入</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+        <button class="flow-node" type="button" data-node="code" data-module="developer" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">⌘</span></span>
+          <span class="flow-title">开发实现</span>
+          <span class="flow-model" data-field="model">Codex</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+        <button class="flow-node" type="button" data-node="check" data-module="checks" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">✓</span></span>
+          <span class="flow-title">独立检查</span>
+          <span class="flow-model" data-field="model">UE / 自动化测试</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+        <button class="flow-node" type="button" data-node="review" data-module="reviewer" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">◎</span></span>
+          <span class="flow-title">任务审核</span>
+          <span class="flow-model" data-field="model">Codex</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+        <button class="flow-node" type="button" data-node="publish" data-module="publisher" data-state="idle">
+          <span class="dev-node-top"><span class="dev-node-icon" aria-hidden="true">↗</span></span>
+          <span class="flow-title">登记验收</span>
+          <span class="flow-model" data-field="model">本地调度器</span>
+          <span class="flow-state" data-field="state">等待同步</span>
+          <span class="dev-node-track" aria-hidden="true"></span>
+        </button>
+      </div>
       <div class="dev-route-row"><div class="flow-caption" id="flow-branch-caption">规划路径待同步</div><div class="rework-caption" id="flow-rework">暂无返工</div></div>
-      <div class="dev-flow-legend"><span><i class="completed"></i>已完成</span><span><i class="running"></i>执行中</span><span><i class="waiting"></i>等待 / 需处理</span><span><i></i>尚未执行</span></div>
+      <div class="dev-flow-legend"><span><i class="completed"></i>已完成</span><span><i class="running"></i>执行中</span><span><i class="waiting"></i>等待</span><span><i class="blocked"></i>需处理</span><span><i></i>尚未执行</span></div>
       <div class="milestone-track"><span class="small">任务全部完成后，进入阶段交付</span><div class="milestone-node" data-node="milestone_review"><strong>Codex 阶段审核</strong><span data-field="state">待进入</span></div><span class="small" aria-hidden="true">→</span><div class="milestone-node" data-node="milestone_publish"><strong>里程碑统一发布</strong><span data-field="state">待进入</span></div></div>
       <ol class="phase-list legacy-phases" id="phase-list" aria-hidden="true"></ol>
 
     </section>
 
+    <section class="panel review-route" id="dev-review-route" aria-labelledby="dev-review-heading" hidden>
+      <div class="review-route-head">
+        <h2 id="dev-review-heading">核验调用路径</h2>
+        <div class="review-route-meta">
+          <span class="tag" id="dev-review-model" hidden></span>
+          <span class="tag" id="dev-review-head" hidden></span>
+        </div>
+      </div>
+      <div class="review-route-steps" id="dev-review-steps" aria-label="核验认证顺序">
+        <div class="route-step" data-route-step="primary" data-state="waiting">
+          <span class="route-step-mark" aria-hidden="true">○</span>
+          <div><strong>主 API Key</strong><p>等待核验</p></div>
+        </div>
+        <div class="route-step" data-route-step="backups" data-state="waiting">
+          <span class="route-step-mark" aria-hidden="true">○</span>
+          <div><strong>备用 Key</strong><p>主 Key 不可用时启用</p></div>
+        </div>
+        <div class="route-step" data-route-step="subscription" data-state="waiting">
+          <span class="route-step-mark" aria-hidden="true">○</span>
+          <div><strong>Codex 订阅</strong><p>API 不可用时接手</p></div>
+        </div>
+      </div>
+      <p class="review-route-note" id="dev-review-note" hidden></p>
+    </section>
+
     <div class="dev-insights">
       <section class="panel panel-pad" id="modules-panel"><div class="panel-head"><div><div class="dev-kicker">节点详情</div><h2>查看阶段与模型分工</h2></div><button id="dev-follow-current" class="dev-follow" type="button">跟随当前阶段</button></div><div class="small" id="modules-count">等待同步</div><div class="role-grid" id="modules-grid"></div><div class="dev-live"><div class="dev-kicker">本轮最新活动</div><p id="dev-live-event">暂无记录</p><span class="small" id="dev-live-time"></span></div></section>
         <section class="panel panel-pad" id="checks-panel">
-          <div class="panel-head"><h2>检查矩阵</h2><span class="tag" id="checks-count">尚无结果</span></div>
+          <div class="panel-head"><h2>独立检查</h2><span class="tag" id="checks-count">尚无结果</span></div>
           <div class="dev-check-overview"><strong id="dev-check-summary">尚无检查记录</strong><span class="tag" id="dev-check-scope">等待同步</span></div>
           <div id="dev-check-progress" class="dev-check-progress" role="img" aria-label="尚无检查记录"></div>
           <div class="small" id="dev-check-pending">等待检查数据</div>
+          <p class="dev-check-cause" id="dev-check-cause" hidden></p>
           <div class="check-list" id="checks"></div><div class="empty" id="checks-empty">独立检查结果将在执行后显示。</div>
         </section>
     </div>
     <section class="panel panel-pad dev-delivery"><div class="panel-head"><div><div class="dev-kicker">验收与交付</div><h2>最近完成的任务</h2></div><a href="#history" data-open-view="history" class="small">全部验收记录 →</a></div><div id="dev-recent-accepted" class="dev-recent-accepted"></div><div class="dev-delivery-note"><span class="dev-delivery-icon" aria-hidden="true">↗</span><div><strong id="dev-delivery-label">等待发布状态</strong><p id="dev-delivery-detail">已验收任务按项目策略统一发布。</p></div></div></section>
     <div class="section-heading"><div><div class="section-index">执行证据</div><h2>任务书与运行记录</h2><p>查看任务书、验收条件、检查结果和最近活动。</p></div></div>
+    <div id="dev-historical-evidence" hidden>
+      <section class="full-flow-test user-repair" id="user-repair-panel" aria-labelledby="user-repair-title" hidden><div class="panel-head"><h2 id="user-repair-title">全流程修复</h2><span class="tag" id="user-repair-status"></span></div><p id="user-repair-summary" class="full-flow-summary"></p><div class="full-flow-meta"><span id="user-repair-model"></span><span id="user-repair-stage"></span></div><p id="user-repair-scope" class="full-flow-scope"></p><button id="user-repair-detail" type="button">查看本批授权、日志与产物 →</button></section>
+      <section class="full-flow-test" id="full-flow-test" aria-labelledby="full-flow-title" hidden><div class="panel-head"><div><div class="dev-kicker">独立测试执行</div><h2 id="full-flow-title">全流程测试</h2></div><span class="tag" id="full-flow-status">读取测试状态</span></div><p id="full-flow-summary" class="full-flow-summary"></p><div class="full-flow-meta"><span id="full-flow-model"></span><span id="full-flow-stage"></span><span id="full-flow-updated"></span></div><p id="full-flow-scope" class="full-flow-scope"></p><p id="full-flow-package-short" class="full-flow-retest" hidden></p><p id="full-flow-retest" class="full-flow-retest" hidden></p><button id="full-flow-detail" type="button" data-flow-lane="development" data-flow-node="full_flow_test">查看日志与测试产物 →</button></section>
+    </div>
     <div class="grid">
       <div class="section-stack">
 
@@ -449,12 +603,12 @@
     }
   }
   const flowElements = new Map([...document.querySelectorAll('[data-node]')].map(el=>[el.dataset.node,el]));
-  const moduleIcons = {routine_planner:'S',critical_planner:'O',developer:'DEV',checks:'CHK',reviewer:'C',publisher:'SYS'};
+  const moduleIcons = {routine_planner:'≡',critical_planner:'◇',developer:'⌘',checks:'✓',reviewer:'◎',publisher:'↗'};
   const moduleStates = {running:'正在执行',ready:'等待执行',waiting:'等待恢复',paused:'已暂停',stale:'状态待核实',blocked:'需要处理',completed:'本轮已完成',idle:'待命',disabled:'未启用',not_required:'本轮无需'};
   let selectedModule = '';
   function prettyModel(value){
     const name=str(value);
-    return {'claude-sonnet-5-5':'Sonnet 5.5','claude-opus-5-5':'Opus 5.5','claude-fable-5-2':'Fable 5.2','gpt-6-astra':'GPT-6 Astra'}[name]||name;
+    return {'claude-sonnet-5-5':'Sonnet 5.5','claude-opus-5-5':'Opus 5.5','claude-fable-5-2':'Fable 5.2','gpt-6-astra':'GPT-6 Astra','gpt-6.2-astra':'GPT-6.2 Astra','gpt-6.2-sol':'GPT-6.2 Sol'}[name]||name;
   }
   function moduleModel(item){
     if(item.model)return prettyModel(item.model)+(item.effort?' · '+str(item.effort):'')+(item.model_source==='configured'?' · 配置':'');
@@ -474,7 +628,8 @@
       const el=flowElements.get(item.id);if(!el)continue;
       el.dataset.state=item.state||'idle';
       const state=el.querySelector('[data-field="state"]');if(state)state.textContent=item.state_label||moduleStates[item.state]||'待同步';
-      const model=el.querySelector('[data-field="model"]');if(model)model.textContent=item.model?prettyModel(item.model):item.configured_model?prettyModel(item.configured_model)+'（配置）':item.id==='check'?'本地检查器':item.id==='publish'?'本地调度器':'模型未记录';
+      const model=el.querySelector('[data-field="model"]');
+      if(model)model.textContent=item.model?prettyModel(item.model)+(item.effort?' · '+item.effort:''):item.configured_model?prettyModel(item.configured_model):item.id==='check'?'UE / 自动化测试':item.id==='publish'?'本地调度器':'模型未记录';
       const title=el.querySelector('.flow-title');if(title)title.textContent=item.title||title.textContent;
       el.title=str(item.summary||item.title);
       if(item.current)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');
@@ -484,7 +639,7 @@
       wire.classList.toggle('lit',!!edge?.active&&current?.state==='running');
     }
     const routeReason=str(workflow.route_reason);
-    text('flow-branch-caption',snapshot.status?.phase==='REPLAN'?'Claude 重新分析同一任务的修复计划，原代码会话保留；之后继续开发、检查和审核。':workflow.route==='critical'?'本轮走关键规划路径。'+(routeReason||'Sonnet 草案由 Opus 核对定稿。'):workflow.route==='routine'?'本轮为日常任务，Sonnet 规划后直接进入开发。'+routeReason:'涉及跨系统架构、复杂依赖、存档契约或整体阶段规划时，由 Opus 核对草案并生成最终任务书。');
+    text('flow-branch-caption',snapshot.status?.phase==='REPLAN'?'正在重新规划同一任务的返工，然后继续开发和独立检查。':routeReason||(workflow.route==='critical'?'关键规划完成后进入开发。':workflow.route==='routine'?'常规规划完成后直接进入开发。':'规划路径待确认'));
     $('flow-branch-caption').title=$('flow-branch-caption').textContent;
     const rework=workflow.rework||{};
     text('flow-rework',rework.active?'正在进行第 '+str(rework.count)+' 次返工 → 同任务开发':'审核要求修改 → 返回同任务开发');
@@ -524,9 +679,81 @@
     const state=!connected?'stale':current?.state||({blocked:'blocked',paused:'paused',heartbeat_stale:'stale',stopped:'waiting',waiting_provider:'waiting',waiting_filesystem:'waiting',waiting_window:'waiting'}[s.code]||'idle');
     return {current,state,label:!connected?'连接中断 · 数据过期':current?.state_label||moduleStates[state]||'等待同步'};
   }
+  const routeCards=new Map([...document.querySelectorAll('[data-route-step]')].map(card=>[card.dataset.routeStep,card]));
+  function renderReviewRoute(snapshot){
+    const route=snapshot.review_route,panel=$('dev-review-route');
+    panel.hidden=!route;
+    if(!route)return;
+    const slots=Array.isArray(route.slots)?route.slots:[];
+    const primary=slots.find(slot=>slot.slot===1);
+    const backups=slots.filter(slot=>slot.slot>1);
+    const backupState=backups.some(slot=>slot.status==='completed')?'completed':
+      backups.some(slot=>slot.status==='running')?'running':
+      backups.length&&backups.every(slot=>slot.status==='failed')?'failed':'waiting';
+    function showStep(key,state,detail){
+      const card=routeCards.get(key),effectiveState=!connected&&state==='running'?'stale':state;
+      card.dataset.state=effectiveState;
+      card.querySelector('.route-step-mark').textContent={running:'●',completed:'✓',failed:'!',stale:'–',not_required:'–'}[effectiveState]||'○';
+      card.querySelector('p').textContent=effectiveState==='stale'?'连接中断 · 状态待同步':detail;
+    }
+    const primaryState=primary?.status||'waiting',latestBackup=backups.find(slot=>slot.status==='running'||slot.status==='completed');
+    const unavailable=backups.filter(slot=>slot.status==='failed').length;
+    const primaryDetail={running:'正在用主 Key 核验',completed:'本轮 API 核验已完成',failed:primary?.failure_label||'本轮不可用'}[primaryState]||
+      (route.fallback_reason==='no_credentials'?'本轮没有可用 Key':'等待核验');
+    const backupDetail={running:'正在使用备用 '+(latestBackup?.slot-1),completed:'备用 '+(latestBackup?.slot-1)+' 已完成核验',
+      failed:unavailable+' 把备用 Key 本轮不可用'}[backupState]||
+      (route.fallback_reason==='no_credentials'?'本轮没有备用 Key':
+        primaryState==='completed'?'本轮未启用':backups.length?backups.length+' 把可轮试':'主 Key 不可用时轮试');
+    showStep('primary',primaryState,primaryDetail);
+    showStep('backups',primaryState==='completed'||route.fallback_reason==='no_credentials'?'not_required':backupState,backupDetail);
+    const native=route.subscription_status||'waiting';
+    const nativeDetail={running:'已接手同一提交的核验',completed:'订阅核验已完成',failed:'订阅核验调用失败'}[native]||
+      (route.api_status==='completed'?'本轮未启用':route.fallback_reason?'正在切换到订阅':'API 不可用时接手');
+    $('dev-review-steps').dataset.fallback=String(!!route.fallback_enabled);
+    routeCards.get('subscription').hidden=!route.fallback_enabled;
+    showStep('subscription',route.api_status==='completed'?'not_required':native,nativeDetail);
+    panel.dataset.current=String(connected&&(route.api_status==='running'||native==='running'));
+    const model=route.model?[prettyModel(route.model),route.effort].filter(Boolean).join(' · '):'';
+    $('dev-review-model').hidden=!model;text('dev-review-model',model);
+    const head=route.head_sha||(['REVIEW','ART_REVIEW'].includes(snapshot.status?.phase)&&route.api_status!=='waiting'?snapshot.task?.head_sha:null);
+    $('dev-review-head').hidden=!head;text('dev-review-head',head?'提交 '+shortSHA(head):'');
+    $('dev-review-head').title=str(head);
+    const apiNote={running:'Responses API 正在核验。',completed:'Responses API 已完成核验。',failed:'Responses API 核验请求失败。'}[route.api_status];
+    const note=!connected?'连接中断，显示上次同步的核验记录。':route.failure_label||(!slots.length?apiNote:'')||'';
+    $('dev-review-note').hidden=!note;text('dev-review-note',note);
+  }
+  const checkNames={'ue-editor-build':'UE 编辑器编译','ue-task-validation':'任务专属验证'};
+  function checkName(id){return checkNames[id]||str(id)||'未命名检查';}
+  function renderCheckRows(checks,currentId){
+    const rows=currentId&&!checks.some(check=>check.id===currentId)?[...checks,{id:currentId,status:'running'}]:checks;
+    $('checks-empty').hidden=rows.length>0;
+    renderList('checks',rows,check=>{
+      const result=check.status==='running'?'running':check.status==='not_run'?'skipped':
+        check.passed===true?'passed':check.passed===false?'failed':'unknown';
+      const [label,tone]={running:['正在检查','good'],skipped:['未运行','warn'],passed:['通过','good'],
+        failed:['未通过','bad'],unknown:['待定','muted']}[result];
+      const row=node('div','check'+(result==='running'?' current':''));
+      row.dataset.result=result;
+      const name=node('span','check-id',checkName(check.id));name.title=str(check.id);
+      row.append(name,node('span','check-result '+tone,label+(check.exit_code!=null&&check.exit_code!==0?' · 退出码 '+check.exit_code:'')));
+      if(check.reason==='editor_build_failed')row.append(node('span','check-reason','等待编辑器编译通过'));
+      return row;
+    });
+  }
   function renderDevelopment(snapshot){
     renderUserRepair(snapshot);
     renderFullFlowTest(snapshot);
+    renderReviewRoute(snapshot);
+    const priority=$('dev-priority-evidence'),history=$('dev-historical-evidence');
+    const blocked=snapshot.status?.phase==='BLOCKED'||snapshot.status?.code==='blocked';
+    const tests=snapshot.full_flow_test;
+    for(const [id,showFirst] of [['user-repair-panel',blocked||!!snapshot.task?.user_repair],
+      ['full-flow-test',blocked||!!snapshot.full_flow_error||!!tests&&!tests.historical]]){
+      const card=$(id),container=showFirst?priority:history;
+      if(card.parentElement!==container)container.append(card);
+    }
+    priority.hidden=!Array.from(priority.children).some(card=>!card.hidden);
+    history.hidden=!Array.from(history.children).some(card=>!card.hidden);
     const task=snapshot.task,wf=snapshot.workflow||{},s=snapshot.status||{},mods=snapshot.modules||[];
     const {current,state,label}=developmentState(snapshot);
     const title=task?str(task.title||task.id).replace(/^TASK-[A-Za-z0-9-]+[：:\s]*/,''):s.code==='done'?'当前运行已完成':'等待下一项开发任务';
@@ -539,7 +766,7 @@
     text('dev-stage-name',current?.title||phaseNames[s.phase]||'等待任务');
     const activeModule=mods.find(m=>m.id===current?.module_id)||mods.find(m=>m.current);
     text('dev-model',activeModule?moduleModel(activeModule):'执行模型未记录');
-    text('dev-route',task?.user_repair?'本批用户授权 · Opus修复全流程问题':s.phase==='REPLAN'?'返工重规划 · 原任务与代码会话保留':wf.route==='critical'?'关键规划路径 · Opus 定稿':wf.route==='routine'?'常规路径 · 直接开发':'规划路径待确认');
+    text('dev-route',task?.user_repair?'用户授权的全流程修复':s.phase==='REPLAN'?'返工重规划':wf.route==='critical'?'关键规划路径':wf.route==='routine'?'常规规划路径':'规划路径待确认');
     text('dev-reworks',task?.reworks??0);text('dev-pending-publish',snapshot.publication?.pending_tasks??'—');
     const rework=wf.rework||{};$('flow-rework').dataset.active=String(!!rework.active);
     $('flow-rework').title=rework.reason||'审核要求修改时，返回同一任务继续开发。';
@@ -553,7 +780,8 @@
       button.classList.toggle('selected',button.dataset.module===selected?.id);
       button.setAttribute('aria-pressed',String(button.dataset.module===selected?.id));
       const entry=(wf.nodes||[]).find(n=>n.id===button.dataset.node),label=button.querySelector('[data-field="state"]');
-      if(label)label.textContent=!connected?'数据过期':entry?.state_label||moduleStates[entry?.state]||'等待同步';
+      if(label)label.textContent=!connected?'数据过期':entry?.id==='check'&&entry.state==='blocked'?'检查未通过':
+        entry?.state_label||moduleStates[entry?.state]||'等待同步';
     }
     $('dev-follow-current').setAttribute('aria-pressed',String(!selectedModule));
     text('modules-count',selected?(selectedModule?'正在查看：':'跟随当前：')+selected.title:'等待模块执行记录');
@@ -564,19 +792,37 @@
     const relevant=old?[]:checks,executed=relevant.filter(c=>c.status!=='not_run'),passed=executed.filter(c=>c.passed===true).length,failed=executed.filter(c=>c.passed===false).length;
     const skipped=relevant.filter(c=>c.status==='not_run').length,recorded=relevant.length,pending=Math.max(0,total-recorded);
     const running=connected&&!old&&state==='running'&&current?.id==='check'&&!!progress.current_id&&!relevant.some(c=>c.id===progress.current_id);
+    const recordedPassed=checks.filter(c=>c.passed===true&&c.status!=='not_run').length;
+    const cause=checks.find(c=>c.id==='ue-editor-build'&&c.passed===false&&c.status!=='not_run')||
+      checks.find(c=>c.passed===false&&c.status!=='not_run');
+    const withheld=checks.filter(c=>c.status==='not_run').length;
+    const causeText=cause?checkName(cause.id)+'未通过'+(cause.exit_code!=null&&cause.exit_code!==0?'（退出码 '+cause.exit_code+'）':'')+
+      (withheld?'，'+withheld+' 项检查未运行。':'。'):'';
+    const causeScope=old?'上一轮：':'本轮：';
+    const nextCheck=connected&&old&&['CODE','REPLAN'].includes(s.phase)?' 修复提交后会重新检查。':'';
+    const checkNote=(old?'上一轮 ':'')+causeText;
+    $('dev-check-cause').hidden=!causeText;
+    $('dev-check-cause').dataset.scope=old?'previous_attempt':'current';
+    text('dev-check-cause',causeText?causeScope+causeText+nextCheck:'');
+    $('overview-check-note').hidden=!causeText;
+    text('overview-check-text',causeText?checkNote:'');
+    text('checks-count',total?(old?'上一轮 · ':'')+recordedPassed+' / '+total+' 通过':'尚无结果');
+    renderCheckRows(checks,running?progress.current_id:null);
     text('dev-check-count',passed+' / '+total);
+    $('dev-check-metric-label').dataset.state=old?'previous_attempt':failed?'failed':'';
+    text('dev-check-metric-label',old?'等待本轮独立检查':failed?failed+' 项未通过'+(skipped?' · '+skipped+' 项未运行':''):'本轮独立检查通过');
     text('dev-check-summary',old?'本轮通过 0 / '+total:passed+' / '+total+' 项通过');
     text('dev-check-scope',old?'下方为上一轮结果':recorded?'本轮检查记录':'尚未记录检查');setTone('dev-check-scope',old?'warn':'','tag');
-    text('dev-check-pending','尚待记录 '+pending+' 项'+(running?' · 正在检查 '+progress.current_id:'')+(failed?' · '+failed+' 项未通过':'')+(skipped?' · '+skipped+' 项未运行':'')+(old?' · 等待本轮新提交后重新检查':''));
+    text('dev-check-pending',[failed?failed+' 项未通过':'',skipped?skipped+' 项未运行':'',running?'正在检查 '+checkName(progress.current_id):'',
+      pending?'尚待记录 '+pending+' 项':'',old?'等待本轮新检查':''].filter(Boolean).join(' · ')||'检查已记录');
     const resultTypes=relevant.map(c=>c.status==='not_run'?'skipped':c.passed===true?'passed':c.passed===false?'failed':'unknown');
     if(running)resultTypes.push('running');
     while(resultTypes.length<Math.min(total,40))resultTypes.push('pending');
     const visibleResults=resultTypes.slice(0,40);
     renderList('dev-check-progress',visibleResults,result=>{const el=node('span','dev-check-segment');el.dataset.result=result;return el;});
     $('dev-check-progress').dataset.scope=old?'previous_attempt':'current';$('dev-check-progress').classList.toggle('is-stale',!connected);
-    $('dev-check-progress').setAttribute('aria-label',(old?'本轮尚无结果；下方保留上一轮检查。':'本轮独立检查：')+'通过 '+passed+' / '+total+' 项，尚待记录 '+pending+' 项。');
-    if(old)text('checks-count','上一轮 · '+checks.filter(c=>c.passed===true&&c.status!=='not_run').length+' / '+total+' 通过');
-    for(const check of $('checks').children){if(!connected&&check.classList.contains('current')){const label=check.querySelector('.check-result');if(label){label.textContent='数据过期';label.className='check-result warn';}}}
+    $('dev-check-progress').setAttribute('aria-label',(old?'本轮尚无结果；下方保留上一轮检查。':'本轮独立检查：')+
+      '通过 '+passed+' / '+total+' 项，未通过 '+failed+' 项，未运行 '+skipped+' 项，尚待记录 '+pending+' 项。');
     const accepted=Array.isArray(snapshot.accepted)?snapshot.accepted:[];text('dev-recent-count',accepted.length);
     const recent=[...accepted].reverse().sort((a,b)=>(parsed(b.accepted_at)?.getTime()||0)-(parsed(a.accepted_at)?.getTime()||0)).slice(0,6);
     renderList('dev-recent-accepted',recent,item=>{
@@ -622,7 +868,8 @@
       if(link.dataset.openView===view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');
     }
     text('view-title',viewLabels[view]);document.title=viewLabels[view]+' · 无人值守工作台';
-    if(!initial){$('view-title').focus({preventScroll:true});window.scrollTo(0,viewScroll.get(view)||0);}
+    if(legacyViews[hash]&&$(hash)){requestAnimationFrame(()=>$(hash).scrollIntoView({block:'start'}));}
+    else if(!initial){$('view-title').focus({preventScroll:true});window.scrollTo(0,viewScroll.get(view)||0);}
   }
   window.addEventListener('hashchange',routeView);
   routeView();
@@ -1187,7 +1434,7 @@
     const planningName=data.planning_provider==='claude'?'Claude Code':'Codex';
     const [action,detail]=waitingToRetry?['自动重试当前步骤','后台会从'+phase+'继续。']:nextAction(s,w,sch,phase,codingName,planningName);
     text('next-action',action);text('next-detail',detail);
-    text('coder-brand',codingName);text('coder-avatar',{claude:'CC',codex:'CX',dsh:'d'}[codingProvider]);
+    text('coder-brand',codingProvider==='codex'?'Codex':'Codex × '+codingName);text('coder-avatar',{claude:'CC',codex:'CX',dsh:'d'}[codingProvider]);
     document.title=viewLabels[activeView]+' · 无人值守工作台';
     for(const [slot,key,name] of [['codex','codex','Codex'],['dsh',codingProvider==='codex'?'codex_coding':codingProvider,codingName]]){
       const model=(data.models||{})[key]||{};
@@ -1216,20 +1463,6 @@
     if(t){text('task-body',t.body||'暂无任务书内容。');text('reworks','返工 '+(t.reworks??0)+' 次');text('base-sha','基线 '+shortSHA(t.base_sha));text('head-sha','当前 '+shortSHA(t.head_sha));$('base-sha').title=str(t.base_sha);$('head-sha').title=str(t.head_sha);const criteria=Array.isArray(t.acceptance_criteria)?t.acceptance_criteria:t.acceptance_criteria?[t.acceptance_criteria]:['暂无验收条件。'];renderList('criteria',criteria,item=>node('li','',item));}
     if(t){const session=t.session_owner_task_id===t.id?str(t.session_id):'';const sessionLabel=(t.session_provider||codingName)+' 独立会话';text('task-session',sessionLabel+' · '+(session?(session.length>18?session.slice(0,18)+'…':session)+' · 归属 '+str(t.id):'等待新会话建立'));$('task-session').title=session?'任务 '+str(t.id)+' · '+sessionLabel+' '+session:'';}
     else{$('task-empty').replaceChildren(node('strong','',sch.allowed===false?'等待 '+start+' 工作窗口':'当前没有执行中的任务'),node('span','',sch.allowed===false?'后台按排期等待，最近活动与心跳仍持续更新。':'下一项任务启动后，任务书与验收条件将显示在这里。'));}
-    const checks=Array.isArray(data.checks)?data.checks:[];
-    const currentCheck=executionConfirmed?data.check_progress?.current_id:null;
-    const total=data.check_progress?.total||checks.length,passed=checks.filter(c=>c.passed===true).length;
-    const skipped=checks.filter(c=>c.status==='not_run').length;
-    const rows=currentCheck?[...checks,{id:currentCheck,status:'running'}]:checks;
-    $('checks-empty').hidden=rows.length>0;
-    text('checks-count',(data.check_progress?.evidence_scope==='previous_attempt'?'上一轮 · ':'')+(total?passed+' / '+total+' 通过'+(skipped?' · '+skipped+' 跳过':''):'尚无结果'));
-    renderList('checks',rows,c=>{
-      const el=node('div','check'+(c.status==='running'?' current':''));
-      const [result,resultTone]=c.status==='running'?['正在检查','good']:c.status==='not_run'?['已跳过','warn']:
-        c.passed===true?['通过','good']:c.passed===false?['未通过','bad']:['待定','muted'];
-      el.append(node('span','check-id',c.id||'未命名检查'),node('span','check-result '+resultTone,result+(c.exit_code!=null&&c.exit_code!==0?' · '+c.exit_code:'')));
-      return el;
-    });
     const activity=Array.isArray(data.activity)?data.activity:[];const events=[...activity].reverse().sort((a,b)=>(parsed(b.at)?.getTime()||0)-(parsed(a.at)?.getTime()||0)).slice(0,30);$('activity-empty').hidden=events.length>0;text('activity-count',events.length?'最近 '+events.length+' 条':'暂无记录');$('activity').classList.toggle('waiting',providerWaiting||filesystemWaiting);
     renderList('activity',events,e=>{const li=node('li'),meta=node('div','event-meta'),time=node('time','event-time',parsed(e.at)?dateTime(e.at):'本轮记录');if(parsed(e.at))time.dateTime=parsed(e.at).toISOString();meta.append(node('span','event-actor',e.actor||e.kind||'系统'),time);li.append(meta,node('div','event-text',e.text||e.kind||'活动记录'));return li;});
     text('window-tag',sch.allowed===true?'窗口已开放':sch.allowed===false?'窗口外':'排期待确认');setTone('window-tag',sch.allowed===true?'good':sch.allowed===false?'warn':'','tag');text('window-main',sch.allowed===true?'当前可以执行任务':sch.allowed===false?'等待 '+start+' 开放':'暂无排期信息');

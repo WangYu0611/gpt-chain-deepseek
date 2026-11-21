@@ -252,6 +252,97 @@ class DevelopmentDashboardBrowserTests(unittest.TestCase):
         expect(self.page.locator("#checks")).to_contain_text("ue-build")
         expect(self.page.locator('.dev-flow [data-node="check"]')).to_have_attribute("data-state", "idle")
 
+    def test_review_route_shows_key_exhaustion_and_live_subscription_on_mobile(self):
+        from playwright.sync_api import expect
+        self.set_current("review", "running")
+        self.value["coding_provider"] = self.value["planning_provider"] = "codex"
+        self.value["status"].update(actor="Codex", provider_actor="Codex", summary="正在核验固定提交。")
+        route_data = self.value["review_route"] = {
+            "fallback_enabled": True, "model": "gpt-6.2-astra", "effort": "ultra",
+            "api_status": "running", "subscription_status": "waiting",
+            "fallback_reason": None, "failure_label": None,
+            "slots": [
+                {"slot": 1, "status": "failed", "failed_requests": 1, "failure_label": "认证失败"},
+                {"slot": 2, "status": "running", "failed_requests": 0, "failure_label": None},
+                {"slot": 3, "status": "waiting", "failed_requests": 0, "failure_label": None},
+            ],
+        }
+        self.refresh()
+
+        route = self.page.locator("#dev-review-route")
+        primary = route.locator('[data-route-step="primary"]')
+        backups = route.locator('[data-route-step="backups"]')
+        subscription = route.locator('[data-route-step="subscription"]')
+        expect(route).to_be_visible()
+        expect(primary).to_contain_text(re.compile(r"主.*Key"))
+        expect(primary).to_have_attribute("data-state", "failed")
+        expect(backups).to_contain_text(re.compile(r"备用.*Key"))
+        expect(backups).to_have_attribute("data-state", "running")
+        expect(subscription).to_contain_text("Codex 订阅")
+        expect(subscription).to_have_attribute("data-state", "waiting")
+
+        route_data.update(api_status="failed", subscription_status="running",
+                          fallback_reason="credentials_exhausted", failure_label="本轮 API 密钥均不可用")
+        for slot in route_data["slots"]:
+            slot.update(status="failed", failed_requests=1, failure_label="当前模型或思考档不可用")
+        self.refresh()
+        expect(backups).to_have_attribute("data-state", "failed")
+        expect(subscription).to_have_attribute("data-state", "running")
+        expect(route).to_contain_text("本轮 API 密钥均不可用")
+
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"), 391)
+        for step in (primary, backups, subscription):
+            box = step.bounding_box()
+            self.assertGreaterEqual(box["x"], 0)
+            self.assertLessEqual(box["x"] + box["width"], 391)
+
+        self.page.route("**/api/status", lambda route: route.fulfill(status=503, body="isolated offline fixture"))
+        self.refresh()
+        expect(subscription).to_have_attribute("data-state", "stale")
+        self.page.unroute("**/api/status")
+
+        self.set_current("code", "running")
+        self.value["review_route"] = None
+        self.refresh()
+        expect(route).to_be_hidden()
+
+    def test_failed_build_and_skipped_checks_remain_distinct_after_rework(self):
+        from playwright.sync_api import expect
+        self.set_current("review", "running")
+        self.value["check_progress"].update(current_id=None, evidence_scope="current_attempt")
+        self.value["checks"] = [
+            {"id": "ue-editor-build", "passed": False, "exit_code": 6, "status": None},
+            *({"id": name, "passed": False, "exit_code": None, "status": "not_run",
+               "reason": "editor_build_failed"}
+              for name in ("ue-CatalogGroups", "ue-HudControlsRefresh", "ue-LayoutBudget", "ue-task-validation")),
+        ]
+        self.refresh()
+
+        checks = self.page.locator("#checks")
+        failed = checks.locator('[data-result="failed"]')
+        skipped = checks.locator('[data-result="skipped"]')
+        progress = self.page.locator("#dev-check-progress")
+        expect(failed).to_have_count(1)
+        expect(failed.locator(".check-id")).to_have_attribute("title", "ue-editor-build")
+        expect(failed).to_contain_text("UE 编辑器编译")
+        expect(failed).to_contain_text("未通过 · 退出码 6")
+        expect(skipped).to_have_count(4)
+        for row in skipped.all():
+            expect(row).to_contain_text("未运行")
+        expect(progress.locator('[data-result="failed"]')).to_have_count(1)
+        expect(progress.locator('[data-result="skipped"]')).to_have_count(4)
+        expect(self.page.locator("#dev-check-cause")).to_be_visible()
+
+        self.set_current("code", "running")
+        self.value["check_progress"].update(evidence_scope="previous_attempt")
+        self.value["workflow"]["rework"].update(active=True, reason="修复上一轮构建失败")
+        self.refresh()
+        expect(self.page.locator("#dev-check-scope")).to_contain_text("上一轮")
+        expect(progress).to_have_attribute("data-scope", "previous_attempt")
+        expect(progress.locator('[data-result="failed"]')).to_have_count(0)
+        expect(skipped).to_have_count(4)
+
     def test_recent_six_records_are_real_and_do_not_complete_current_publication(self):
         from playwright.sync_api import expect
         recent = self.page.locator("#dev-recent-accepted")

@@ -213,6 +213,9 @@ class DashboardStateTests(unittest.TestCase):
         result = self.snapshot()
         self.assertEqual(result["codex_auth"]["current"], "responses_api")
         self.assertTrue(result["api_review"]["fallback_pending"])
+        self.assertEqual(result["review_route"]["api_status"], "failed")
+        self.assertEqual(result["review_route"]["subscription_status"], "waiting")
+        self.assertEqual(result["review_route"]["fallback_reason"], "no_credentials")
         self.assertIn("正在切换至 Codex 订阅", result["activity"][0]["text"])
         self.assertFalse(result["status"]["attempt_finished"])
 
@@ -229,6 +232,8 @@ class DashboardStateTests(unittest.TestCase):
         result = self.snapshot()
         self.assertEqual(result["codex_auth"], {"policy": "responses_then_subscription", "current": "chatgpt", "fallback": True})
         self.assertIsNone(result["api_review"])
+        self.assertEqual(result["review_route"]["subscription_status"], "running")
+        self.assertEqual(result["review_route"]["api_status"], "failed")
         self.assertEqual([entry["text"] for entry in result["activity"]], ["开始本轮执行", "订阅核验进度"])
         self.assertFalse(result["status"]["attempt_finished"])
 
@@ -240,9 +245,69 @@ class DashboardStateTests(unittest.TestCase):
         os.utime(receipt, (observed + 20, observed + 20))
         result = self.snapshot()
         self.assertEqual(result["codex_auth"]["current"], "chatgpt")
+        self.assertEqual(result["review_route"]["subscription_status"], "completed")
         self.assertTrue(result["status"]["attempt_finished"])
         self.assertEqual(result["status"]["elapsed_seconds"], 290)
         self.assertNotIn(source["api_receipt_sha256"], json.dumps(result))
+
+        self.write(receipt, dict(native, responses_fallback_source=source, exit_code=None, launch_or_capture_failed=True))
+        self.assertEqual(self.snapshot()["review_route"]["subscription_status"], "failed")
+
+    def test_review_route_anonymizes_attempts_and_requires_the_current_task_and_head(self):
+        self.config["codex"].update(review_transport="responses_api", responses_subscription_fallback=True,
+                                    model="gpt-6.2-astra", reasoning_effort="high")
+        self.write(self.config_path, self.config)
+        head = "a" * 40
+        self.state.update(phase="REVIEW", task={"id": "TASK-1", "candidate": {"head_sha": head}})
+        directory = self.logs([], kind="review")
+        operation = self.state["operation"]
+        operation.update(task_id="TASK-1", head_sha=head, review_model="gpt-6.2-astra", review_reasoning_effort="ultra")
+        rejects = {"credential_slot": 1, "http_status": 401, "api_error_code": "invalid_api_key",
+                   "raw_message": "PRIVATE_PROVIDER_MESSAGE"}
+        rate_limit = {"credential_slot": 1, "http_status": 429, "api_error_code": "PRIVATE_UNKNOWN_CODE",
+                      "api_key": "PRIVATE_KEY"}
+        receipt = {"protocol": "openai_responses_v1", "kind": "review", "head_sha": head, "status": "running",
+                   "exit_code": None, "credential_count": 3, "request_failures": [rate_limit, rejects],
+                   "unavailable_credentials": [rejects], "turns": []}
+        path = directory / "process.json"
+        self.write(path, receipt)
+        route = self.snapshot()["review_route"]
+        self.assertEqual((route["model"], route["effort"]), ("gpt-6.2-astra", "ultra"))
+        self.assertEqual(route["api_status"], "running")
+        self.assertEqual([slot["status"] for slot in route["slots"]], ["failed", "running", "waiting"])
+        self.assertEqual(route["slots"][0], {"slot": 1, "status": "failed", "failed_requests": 2,
+                                             "failure_label": "密钥无效或缺少调用权限"})
+        self.assertNotIn("PRIVATE_", json.dumps(route))
+
+        receipt.update(status="completed", exit_code=0)
+        self.write(path, receipt)
+        route = self.snapshot()["review_route"]
+        self.assertEqual([slot["status"] for slot in route["slots"]], ["failed", "completed", "waiting"])
+        self.assertEqual(route["api_status"], "completed")
+
+        operation["task_id"] = "TASK-2"
+        self.assertEqual(self.snapshot()["review_route"]["slots"], [])
+        operation["task_id"] = "TASK-1"
+        operation["head_sha"] = "b" * 40
+        self.assertEqual(self.snapshot()["review_route"]["api_status"], "waiting")
+        operation["head_sha"] = head
+        receipt["head_sha"] = "b" * 40
+        self.write(path, receipt)
+        self.assertEqual(self.snapshot()["review_route"]["slots"], [])
+
+    def test_check_projection_distinguishes_compile_failure_from_unrun_checks(self):
+        self.state.update(phase="REVIEW", task={"id": "TASK-1", "check_results": [
+            {"id": "ue-editor-build", "passed": False, "exit_code": 6},
+            {"id": "ue-task-validation", "passed": False, "status": "NOT_RUN", "reason": "editor_build_failed",
+             "stderr_path": "PRIVATE_LOG_PATH"},
+            {"id": "ue-test", "passed": False, "status": "NOT_RUN", "reason": "PRIVATE_REASON"},
+        ]})
+        result = self.snapshot()
+        summary = next(item["summary"] for item in result["workflow"]["nodes"] if item["id"] == "check")
+        self.assertIn("1 项未通过、2 项未运行", summary)
+        self.assertEqual(result["checks"][1]["reason"], "editor_build_failed")
+        self.assertEqual(result["checks"][1]["status"], "not_run")
+        self.assertNotIn("PRIVATE_", json.dumps(result["checks"]))
 
     def test_failed_direct_api_progress_preserves_provider_wait_and_next_retry(self):
         self.config["codex"].update(review_transport="responses_api", auth_mode="api_key")
@@ -770,7 +835,8 @@ class DashboardStateTests(unittest.TestCase):
         ]
         result = self.snapshot()
         self.assertEqual(result["check_progress"], {"total": 1, "current_id": None})
-        self.assertEqual(result["checks"], [{"id": "ue-behavior", "passed": False, "exit_code": None, "status": "not_run"}])
+        self.assertEqual(result["checks"], [{"id": "ue-behavior", "passed": False, "exit_code": None,
+                                            "status": "not_run", "reason": "editor_build_failed"}])
 
     def test_corrupt_state_binding_and_missing_state(self):
         result = dashboard.collect_snapshot(self.config_path)
