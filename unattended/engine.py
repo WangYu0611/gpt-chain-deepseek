@@ -1047,6 +1047,7 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 (planner_provider != "claude" and not tiered)):
             raise RuntimeError("规划模型断点与当前提供方或 HEAD 不匹配。")
         planned_tests = planned_core_tests(self.config)
+        headless_codex = self.config.get("headless") and self.config.get("coding_provider") == "codex"
         publication = self._publication()
         completion_rule = ("里程碑系统工作完成后返回 action=complete 提交阶段提案，人工待办可继续保留。\n"
                            if publication else "全部目标完成后返回 action=complete。\n")
@@ -1067,14 +1068,19 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "\n以当前本地工作区的固定 HEAD 为规划依据。使用本地只读命令核对源码、说明和 Git 状态；"
                 "尚未发布的提交只能在本地核实。禁止使用 GitHub 或远端旧版资料代替当前提交的证据。\n")
         if planned_tests:
+            test_execution = (
+                "编码者准备测试和验证清单，全部 UE 测试由提交后的独立 CHECK 构建并执行；任务书不要要求提交前运行 UE。"
+                if headless_codex
+                else "编码者可提交前预跑这组测试，提交后由调度器独立复跑。"
+            )
             prompt += (
                 "\n任务书明确写出玩家能完成的流程、本次功能范围和明确留到后续的事项。"
                 "验收条件写明场景、操作与可观察的预期结果，覆盖本轮核心功能。"
                 "为 action=task 返回 core_tests，列 1 至 5 个可在 NullRHI 执行的完整 ZhuGuoCity 自动化测试名。"
                 "core_tests 每个字符串只能是完整测试名，不得附加括号、验收编号、说明或命令。"
                 "在任务书正文另行注明各测试对应的验收条件，以及是复用还是由编码者新增。"
-                "编码者可提交前预跑这组测试，提交后由调度器独立复跑。"
-                "全量自动回归由里程碑检查执行。action=complete 或 blocked 时 core_tests 返回空列表。\n"
+                + test_execution
+                + "全量自动回归由里程碑检查执行。action=complete 或 blocked 时 core_tests 返回空列表。\n"
             )
         if selection is not None:
             prompt += (
@@ -1175,7 +1181,8 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         task_book = (title + "\n\nBase SHA: " + current + "\n\n" + task["body"] +
                      "\n\n验收条件：\n" + "\n".join("- " + item for item in task["acceptance_criteria"]) + "\n")
         if core_tests is not None:
-            task_book += "\n提交前核心测试（NullRHI）\n" + "\n".join("- " + name for name in core_tests) + "\n"
+            test_heading = "提交后独立 CHECK 核心测试（NullRHI）" if headless_codex else "提交前核心测试（NullRHI）"
+            task_book += "\n" + test_heading + "\n" + "\n".join("- " + name for name in core_tests) + "\n"
         write_text(directory / "TASK.md", task_book)
         state["task"], state["phase"] = task, "CODE"
 
@@ -1593,6 +1600,12 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
                 "Build.bat、打包工具或引擎进程。需采集正常 RHI 画面时，"
                 "在最终 HEAD 的验证清单中以 normal_cmd 运行离屏用例并声明产物，"
                 "由 CHECK 固定使用 UnrealEditor-Cmd.exe 配合 D3D12 执行，据实标记待 CHECK。\n")
+            if coder == "codex":
+                prompt += (
+                    "这项阶段限制适用于旧任务书、返工反馈和恢复会话中的验证要求。"
+                    "编码阶段可以静态检查源码并读取已有日志，禁止直接或经脚本、子进程调用 UE 的编译器和链接器。"
+                    "禁止调用 MSVC cl.exe（含 /Zs 语法检查、/P 或 /EP 预处理、重放或改写 .rsp 响应文件）和 link.exe。"
+                    "把需要执行的 UE 验证记录到交付和验证清单，提交后由独立 CHECK 运行。\n")
         if task.get("code_resume") and task.get("code_failures"):
             prompt += (
                 f"\n执行器交付检查反馈：上次 {coder_name} 协议轮已结束，但相对 "

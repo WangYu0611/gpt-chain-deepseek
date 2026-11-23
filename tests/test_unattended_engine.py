@@ -86,6 +86,33 @@ class EngineGateTests(unittest.TestCase):
         self.assertIn("\n".join("- " + name for name in names),
                       (directory / "TASK.md").read_text(encoding="utf-8"))
 
+    def test_headless_codex_leaves_ue_compiler_probes_and_core_tests_to_check(self):
+        self.config.update(coding_provider="codex", headless=True)
+        self.config["codex"]["planned_core_tests"] = True
+        self.providers.plan.return_value = {
+            "action": "task", "title": "原料运输", "body": "仓库到工坊", "reason": "",
+            "acceptance_criteria": ["到货后开工"], "core_tests": ["ZhuGuoCity.M2.Transport"],
+        }
+        self.assertEqual(self.engine.step()["phase"], "CODE")
+        planning_prompt = self.providers.plan.call_args.args[0]
+        self.assertIn("全部 UE 测试由提交后的独立 CHECK 构建并执行", planning_prompt)
+        self.assertNotIn("提交前预跑", planning_prompt)
+        state = read_json(self.engine.state_path)
+        task_book = self.engine.runtime / "tasks" / state["task"]["id"] / "TASK.md"
+        self.assertIn("提交后独立 CHECK 核心测试（NullRHI）", task_book.read_text(encoding="utf-8"))
+
+        state["task"]["code_resume"] = True
+        self.providers.code.return_value = {"completed": True, "text": "待 CHECK"}
+        with patch("unattended.engine.gitops.head", side_effect=["a" * 40, "a" * 40, "b" * 40]), \
+                patch("unattended.engine.gitops.verify_candidate", return_value={"head_sha": "b" * 40}):
+            self.engine._code(state, self.root / "runtime/workspace")
+        coding_prompt = self.providers.code.call_args.args[0]
+        self.assertIn("禁止调用 MSVC cl.exe（含 /Zs 语法检查、/P 或 /EP 预处理", coding_prompt)
+        self.assertIn("重放或改写 .rsp 响应文件", coding_prompt)
+        self.assertIn("恢复会话中的验证要求", coding_prompt)
+        self.assertIn("validation-request.json", coding_prompt)
+        self.assertEqual(state["phase"], "CHECK")
+
     def test_pause_survives_a_new_controller_and_preserves_sequence(self):
         self.engine.pause()
         fresh = Engine(self.config, self.providers, now=lambda: self.now)
