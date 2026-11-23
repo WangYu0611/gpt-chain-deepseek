@@ -18,7 +18,7 @@ from .config import (ART_CODING_MODEL, claude_coding_settings, claude_execution_
                      codex_review_transport, codex_role_settings, planned_core_tests)
 from . import gitops
 from .providers import (AgentProviders, ProviderError, _responses_api_receipt, codex_result_directory,
-                        read_session, validate_output)
+                        codex_resume_compaction_failed, read_session, validate_output)
 from .storage import is_windows_sharing_error, lock, read_json, write_json, write_text
 from .art_autonomy import ArtAutonomy
 from .task_replanning import TaskReplanning
@@ -716,6 +716,46 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         snapshot = self._snapshot(state)
         write_json(self.runtime / "heartbeat.json", snapshot)
         return snapshot
+
+    def _resume_codex_after_compaction(self, state, work):
+        """Replace a repeatedly failing resumed thread once for this checkout and rework."""
+        retry = state["provider_retry"]
+        if (state["phase"] != "CODE" or self.config.get("coding_provider") != "codex" or
+                retry["status"] != "waiting" or retry["reason"] != "transport" or retry["attempt"] < 2):
+            return False
+        task, op = state["task"], state["operation"]
+        if (not task or not op or task.get("kind") == "art" or task.get("coding_provider") != "codex" or
+                task.get("user_repair") or (task.get("user_followup") or {}).get("status") in {"active", "exhausted"} or
+                (task.get("replanning") or {}).get("status") == "pending"):
+            return False
+        session, code_base = task.get("session_id"), task.get("code_base")
+        if (not session or task.get("session_owner_task_id") != task["id"] or
+                op.get("coding_provider") != "codex" or op.get("requested_session_id") != session or
+                not code_base or op.get("code_base") != code_base or op.get("head_sha") != code_base or
+                retry["head_sha"] != code_base):
+            return False
+        reworks = task["reworks"]
+        if any(entry.get("reason") == "codex_remote_compaction" and entry.get("code_base") == code_base and
+               entry.get("reworks") == reworks for entry in task.get("session_history", [])):
+            return False
+        runtime = self.runtime.resolve()
+        out = Path(op["output_dir"])
+        if out.parent != runtime / "runs" or out.resolve() != out or not codex_resume_compaction_failed(
+                out, work=work.resolve(), task_id=task["id"], session=session):
+            return False
+        self._claim_session(task, session)
+        task.setdefault("session_history", []).append({
+            "session_id": session, "task_id": task["id"], "retired_at": self.now().isoformat(),
+            "reason": "codex_remote_compaction", "reworks": reworks, "code_base": code_base,
+            "source_output_dir": str(out), "retry_attempt": retry["attempt"],
+        })
+        task.update(session_id=None, code_resume=True)
+        task.pop("session_owner_task_id", None)
+        task.pop("session_provider", None)
+        state.update(operation=None, last_error=None)
+        state.pop("provider_retry")
+        self._save(state)
+        return True
 
     def _wait_seconds(self, result):
         if result.get("status") != "waiting_provider":
@@ -1998,8 +2038,10 @@ class Engine(ArtAutonomy, TaskReplanning, UserFollowup, UserRepair):
         phase = state["phase"]
         try:
             if state.get("provider_retry") is not None:
-                deadline = self._validate_provider_retry(state, self.runtime / "workspace")
-                if state["provider_retry"]["status"] == "waiting" and self.now() < deadline:
+                work = self.runtime / "workspace"
+                deadline = self._validate_provider_retry(state, work)
+                if (state["provider_retry"]["status"] == "waiting" and
+                        not self._resume_codex_after_compaction(state, work) and self.now() < deadline):
                     return dict(self._snapshot(state), status="waiting_provider")
             closing = calendar.seconds_until_close(self.now()) if self.config["close_policy"] == "strict" else None
             with gitops.deadline(closing):

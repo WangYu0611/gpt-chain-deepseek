@@ -312,7 +312,7 @@ def _codex_api_billing_error(error: dict) -> bool:
             inner.get("type") == "insufficient_quota")
 
 
-def _codex_terminal_error(path: Path, capture_limit: int) -> dict | None:
+def _codex_terminal_error(path: Path, capture_limit: int, *, before_work_session: str | None = None) -> dict | None:
     """Inspect one complete Codex turn, including logs with large tool items."""
     if path.is_symlink():
         return None
@@ -337,7 +337,8 @@ def _codex_terminal_error(path: Path, capture_limit: int) -> dict | None:
                 return None
             if not opened:
                 thread_id = event.get("thread_id")
-                if event_type != "thread.started" or not isinstance(thread_id, str) or not _SESSION.fullmatch(thread_id):
+                if (event_type != "thread.started" or not isinstance(thread_id, str) or not _SESSION.fullmatch(thread_id) or
+                        (before_work_session is not None and thread_id != before_work_session)):
                     return None
                 opened = True
             elif event_type in {"thread.started", "turn.completed"}:
@@ -350,9 +351,35 @@ def _codex_terminal_error(path: Path, capture_limit: int) -> dict | None:
                 terminal = event.get("error")
                 if not started or type(terminal) is not dict:
                     return None
+            elif before_work_session is not None and event_type != "error":
+                item = event.get("item")
+                if event_type != "item.completed" or not isinstance(item, dict) or item.get("type") != "error":
+                    return None
         if source.read(1):
             return None
     return terminal
+
+
+def codex_resume_compaction_failed(out: Path, *, work: Path, task_id: str, session: str) -> bool:
+    """Prove that a managed Codex resume failed during compaction before doing work."""
+    try:
+        record = _json_file(out / "process.json", limit=16384)
+        expected = {"kind": "code", "coding_provider": "codex", "coding_protocol": "codex_exec_v1",
+                    "coding_sandbox": "workspace-write", "codex_auth_mode": "chatgpt", "task_id": task_id,
+                    "workspace": str(work), "output_dir": str(out), "requested_session": session,
+                    "session_id": session, "retry_reason": "transport"}
+        if (not isinstance(record, dict) or any(record.get(key) != value for key, value in expected.items()) or
+                type(record.get("exit_code")) is not int or record["exit_code"] == 0 or
+                record.get("timed_out") is not False or record.get("output_limit_exceeded") is not False or
+                record.get("transient") is not True or record.get("launch_or_capture_failed")):
+            return False
+        error = _codex_terminal_error(out / "stdout.log", _FAILURE_STDOUT_LIMIT, before_work_session=session)
+        message = error.get("message") if error else None
+        if not isinstance(message, str) or not message.startswith("Error running remote compact task:"):
+            return False
+        return (_transient_error(error) or {}).get("reason") == "transport"
+    except (OSError, ValueError, TypeError, RecursionError):
+        return False
 
 
 def _codex_api_quota_failed(kind: str, out: Path) -> bool:
