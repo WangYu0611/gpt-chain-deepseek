@@ -52,7 +52,7 @@ if (!(Test-Path secrets.local.json)) { Copy-Item secrets.example.json secrets.lo
 | `TRIPO_API_KEY` | 在美术批次的 `key_file` 中填入 `secrets.local.json` 的绝对路径，该文件须位于目标项目目录之外。 |
 | `FEISHU_WEBHOOK_URL` | 启用本地飞书通知且通知设置未填写 `webhook_url` 时使用。默认在 `.unattended/feishu.local.json` 中设置启用状态、事件与面板地址。 |
 
-项目启用 `codex_only`。开发使用 `gpt-6.2-sol`，规划和核验使用 `gpt-6.2-astra`。Codex CLI 使用已登录的 ChatGPT 订阅，GitHub 推送使用 Git 已配置的凭据。北京时间 2026-11-22 00:00 起，所有新调用改用 `high`。
+项目启用 `codex_only`。开发使用 `gpt-6.2-sol`，规划和核验使用 `gpt-6.2-astra`，各职责的新调用统一使用 `high` 思考档。Codex CLI 使用已登录的 ChatGPT 订阅，GitHub 推送使用 Git 已配置的凭据。
 
 任务、阶段与美术核验可设置 `"review_transport": "responses_api"`，先用主密钥，再按顺序试备用密钥。启用 `"responses_subscription_fallback": true` 后，密钥全部不可用或服务在有限重试后仍不可达，同一轮核验会通过已登录的 Codex CLI 订阅重新读取同一提交的证据。订阅沿用本轮模型，使用发起调用时的思考档位。有效的验收结论会直接保存，证据或协议校验失败会正常报错。
 

@@ -39,11 +39,9 @@
   "codex": {
     "command": ["codex.exe"],
     "model": "gpt-6.2-astra",
-    "reasoning_effort": "ultra",
+    "reasoning_effort": "high",
     "coding_model": "gpt-6.2-sol",
-    "coding_reasoning_effort": "ultra",
-    "effort_change_at": "2026-11-22T00:00:00+08:00",
-    "effort_after_change": "high",
+    "coding_reasoning_effort": "high",
     "tiered_planning": true,
     "auth_mode": "chatgpt",
     "windows_sandbox": "unelevated",
