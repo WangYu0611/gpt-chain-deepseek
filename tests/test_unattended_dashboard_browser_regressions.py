@@ -101,6 +101,34 @@ class DashboardBrowserRegressionTests(unittest.TestCase):
             expect(self.page.locator("#view-" + view)).to_be_visible()
         self.cache.resolve_art.assert_not_called()
 
+    def test_overview_opens_current_step_evidence_and_labels_art_preview(self):
+        from playwright.sync_api import expect
+
+        check = {"id": "check", "title": "独立检查", "state": "running", "state_label": "正在执行",
+                 "module_id": "checks", "current": True, "detail_url": "/api/flow/detail?lane=development&node=check"}
+        self.value["workflow"] = {"current": "check", "nodes": [check], "edges": []}
+        self.value["flows"] = {"development": {"current": "check", "nodes": [check]}}
+        self.cache.flow_detail.return_value = {"lane": "development", "node": "check", "title": "独立检查",
+                                               "summary": "本轮检查证据", "logs": [], "artifacts": []}
+        self.open_view("overview")
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        self.refresh()
+
+        active = self.page.locator('#overview-steps [data-overview-node="check"]')
+        expect(active).to_have_attribute("aria-current", "step")
+        expect(active).to_contain_text("正在执行")
+        expect(self.page.locator('#overview-steps [data-overview-node="code"]')).to_be_disabled()
+        expect(self.page.locator("#spotlight-image")).to_be_visible()
+        expect(self.page.locator("#spotlight-source")).to_contain_text("HOUSE-001")
+        self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"), 390)
+
+        active.press("Enter")
+        expect(self.page.locator("#flow-detail-dialog")).to_be_visible()
+        expect(self.page.locator("#flow-detail-summary")).to_have_text("本轮检查证据")
+        self.page.keyboard.press("Escape")
+        expect(active).to_be_focused()
+        self.cache.resolve_art.assert_not_called()
+
     def test_same_version_draft_focus_and_selection_survive_other_batch_refresh(self):
         from playwright.sync_api import expect
         feedback = self.card().locator(".art-feedback")

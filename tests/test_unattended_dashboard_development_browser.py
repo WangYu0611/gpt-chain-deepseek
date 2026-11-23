@@ -157,8 +157,13 @@ class DevelopmentDashboardBrowserTests(unittest.TestCase):
         expect(self.page.locator("#full-flow-summary")).to_have_text("首轮未通过。")
         self.assertLess(self.page.locator("#user-repair-panel").bounding_box()["y"],
                         self.page.locator("#full-flow-test").bounding_box()["y"])
+        self.page.locator('[data-open-view="history"]').first.click()
+        self.page.locator("#history-search").fill("无匹配任务")
+        expect(self.page.locator("#accepted-empty")).to_have_text("没有符合条件的验收记录。")
+        self.page.locator('[data-open-view="development"]').first.click()
         self.page.locator("#user-repair-detail").click()
         expect(self.page.locator("#view-history")).to_be_visible()
+        expect(self.page.locator("#history-search")).to_have_value("")
         review = self.page.locator(f'#accepted details[data-task-id="{archived["id"]}"]')
         expect(review.locator("p")).to_be_visible()
         expect(review.locator("summary")).to_be_focused()

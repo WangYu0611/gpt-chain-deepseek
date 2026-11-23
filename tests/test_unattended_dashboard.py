@@ -77,7 +77,7 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertIn('id="deferred"', page)
         self.assertIn("待手动确认（不阻塞开发）", page)
         self.assertIn("这些事项尚未验收通过", page)
-        self.assertIn("node('div','event-text',d.reason)", page)
+        self.assertIn("node('p','history-deferred-reason',entry.reason)", page)
         self.assertIn("el.textContent=str(value)", page)
         self.assertNotIn(".innerHTML", page)
         self.assertNotIn("insertAdjacentHTML", page)
