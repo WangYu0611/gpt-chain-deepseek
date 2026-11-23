@@ -27,6 +27,12 @@ from .dashboard_state import collect_snapshot
 from .storage import lock, read_json, write_json
 
 ROOT = Path(__file__).resolve().parent.parent
+_DASHBOARD_ASSETS = {
+    "/": ("dashboard.html", "text/html; charset=utf-8"),
+    "/dashboard.html": ("dashboard.html", "text/html; charset=utf-8"),
+    "/dashboard.css": ("dashboard.css", "text/css; charset=utf-8"),
+    "/dashboard.js": ("dashboard.js", "text/javascript; charset=utf-8"),
+}
 OWNER = "gpt_chain_deepseek.dashboard/v1"
 DEFAULT_PORT = 8765
 
@@ -134,8 +140,8 @@ def make_handler(cache, identity):
             self.send_header("Cross-Origin-Resource-Policy", "same-origin")
             if filename:
                 self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + quote(filename, safe=""))
-            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; "
-                             "style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+            self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; "
+                             "style-src 'self'; connect-src 'self'; img-src 'self' data:; "
                              "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
             self.end_headers()
             if self.command != "HEAD":
@@ -146,8 +152,10 @@ def make_handler(cache, identity):
                 self._respond(403, b'{"error":"local origin required"}')
                 return
             path = urlsplit(self.path).path
-            if path in {"/", "/dashboard.html"}:
-                self._respond(200, (ROOT / "unattended/dashboard.html").read_bytes(), "text/html; charset=utf-8")
+            asset = _DASHBOARD_ASSETS.get(path)
+            if asset is not None:
+                name, content_type = asset
+                self._respond(200, (ROOT / "unattended" / name).read_bytes(), content_type)
             elif path == "/api/status":
                 self._respond(200, json.dumps(cache.get(), ensure_ascii=False).encode("utf-8"))
             elif path == "/api/health":

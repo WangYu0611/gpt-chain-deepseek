@@ -42,9 +42,24 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertNotIn("Access-Control-Allow-Origin", headers)
         status, headers, body = self.request("/")
         self.assertEqual(status, 200)
-        self.assertIn("无人值守工作台", body.decode())
-        self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
+        page = body.decode()
+        self.assertIn("无人值守工作台", page)
+        self.assertIn('href="/dashboard.css"', page)
+        self.assertIn('src="/dashboard.js"', page)
+        self.assertNotIn("<style>", page)
+        self.assertNotIn("<script>", page)
+        policy = headers["Content-Security-Policy"]
+        self.assertIn("frame-ancestors 'none'", policy)
+        self.assertIn("script-src 'self'", policy)
+        self.assertIn("style-src 'self'", policy)
+        self.assertNotIn("unsafe-inline", policy)
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        for path, mime in (("/dashboard.css", "text/css"), ("/dashboard.js", "text/javascript")):
+            with self.subTest(path=path):
+                status, headers, content = self.request(path)
+                self.assertEqual(status, 200)
+                self.assertTrue(headers["Content-Type"].startswith(mime))
+                self.assertTrue(content)
 
     def test_foreign_host_and_origin_cannot_read_snapshot(self):
         for headers in ({"Host": "attacker.example"}, {"Origin": "https://attacker.example"}, {"Origin": "null"}):
@@ -77,10 +92,13 @@ class DashboardHTTPTests(unittest.TestCase):
         self.assertIn('id="deferred"', page)
         self.assertIn("待手动确认（不阻塞开发）", page)
         self.assertIn("这些事项尚未验收通过", page)
-        self.assertIn("node('p','history-deferred-reason',entry.reason)", page)
-        self.assertIn("el.textContent=str(value)", page)
-        self.assertNotIn(".innerHTML", page)
-        self.assertNotIn("insertAdjacentHTML", page)
+        status, _, body = self.request("/dashboard.js")
+        self.assertEqual(status, 200)
+        script = body.decode()
+        self.assertIn("node('p','history-deferred-reason',entry.reason)", script)
+        self.assertIn("el.textContent=str(value)", script)
+        self.assertNotIn(".innerHTML", script)
+        self.assertNotIn("insertAdjacentHTML", script)
 
     def test_provider_wait_uses_iso_countdown_and_does_not_highlight_execution(self):
         self.cache.get.return_value.update(status={"code": "waiting_provider", "phase": "CODE", "actor": "系统"},
@@ -89,15 +107,15 @@ class DashboardHTTPTests(unittest.TestCase):
         status, _, body = self.request("/api/status")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["provider_retry"]["next_retry_at"], "2026-11-02T11:10:00+00:00")
-        status, _, body = self.request("/")
+        status, _, body = self.request("/dashboard.js")
         self.assertEqual(status, 200)
-        page = body.decode()
-        self.assertIn("parsed(retry?.next_retry_at)", page)
-        self.assertIn("nextRetry.getTime()-Date.now()", page)
-        self.assertIn("即将重试，等待执行器确认", page)
-        self.assertIn("待重试 · 服务恢复后继续", page)
-        self.assertIn("&&!providerWaiting", page)
-        self.assertIn("classList.toggle('waiting',providerWaiting||filesystemWaiting)", page)
+        script = body.decode()
+        self.assertIn("parsed(retry?.next_retry_at)", script)
+        self.assertIn("nextRetry.getTime()-Date.now()", script)
+        self.assertIn("即将重试，等待执行器确认", script)
+        self.assertIn("待重试 · 服务恢复后继续", script)
+        self.assertIn("&&!providerWaiting", script)
+        self.assertIn("classList.toggle('waiting',providerWaiting||filesystemWaiting)", script)
 
 
 class DashboardIntegrationTests(unittest.TestCase):
