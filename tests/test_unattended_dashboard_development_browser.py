@@ -413,6 +413,32 @@ class DevelopmentDashboardBrowserTests(unittest.TestCase):
             directory.mkdir(parents=True, exist_ok=True)
             self.page.screenshot(path=str(directory / "development-mobile.png"), full_page=True)
 
+    def test_graph_follows_the_selected_planning_branch_and_marks_rework(self):
+        from playwright.sync_api import expect
+
+        self.set_current("code", "running")
+        workflow = self.value["workflow"]
+        workflow["edges"] = [{"from": "routine_plan", "to": "code", "active": True}]
+        self.refresh()
+        graph = self.page.locator(".dev-flow")
+        routine = graph.locator('[data-node="routine_plan"]')
+        critical = graph.locator('[data-node="critical_plan"]')
+        expect(graph).to_have_attribute("data-route", "routine")
+        expect(routine).to_have_attribute("data-link", "active")
+        expect(critical).to_have_attribute("data-state", "not_required")
+
+        workflow["route"] = "critical"
+        workflow["edges"] = [{"from": "routine_plan", "to": "critical_plan", "active": False},
+                             {"from": "critical_plan", "to": "code", "active": True}]
+        next(item for item in workflow["nodes"] if item["id"] == "critical_plan").update(state="completed")
+        workflow["rework"].update(active=True, count=3)
+        self.refresh()
+
+        expect(graph).to_have_attribute("data-route", "critical")
+        expect(graph).to_have_attribute("data-branch", "complete")
+        expect(critical).to_have_attribute("data-link", "active")
+        expect(self.page.locator("#flow-rework")).to_contain_text("第 3 次返工")
+
     def test_missing_task_clears_old_focus_and_does_not_invent_running_work(self):
         from playwright.sync_api import expect
         self.value = _empty(datetime.now(timezone.utc))
