@@ -14,7 +14,7 @@ from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
 from .config import (CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings,
-                     codex_review_transport, codex_role_settings, load_config)
+                     codex_review_transport, codex_role_settings, load_config, validate_model_settings)
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
 TAIL_BYTES = 128 * 1024
@@ -30,6 +30,10 @@ _REVIEW_FALLBACK_LABELS = {
     "credentials_exhausted": "本轮 API 密钥均不可用",
     "api_unavailable": "API 请求暂不可用",
 }
+_API_KEY_STATUS_REASONS = frozenset({
+    "completed", "output_limit", "invalid_key", "permission_denied", "quota_exhausted",
+    "rate_limited", "model_unavailable", "transport", "server_error", "unexpected_error",
+})
 SESSION_HEADER_BYTES = 8 * 1024
 CLAUDE_SESSION_HEADER_BYTES = 64 * 1024
 _SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
@@ -411,6 +415,39 @@ def _api_review_progress(runtime, directory, operation):
         return None
 
 
+def _api_key_status(runtime, configured_model):
+    """Project the last local probe without accessing keys or contacting a provider."""
+    try:
+        path = _confined(runtime, runtime / "api-key-status.json")
+        receipt = _object(path, maximum=8192)
+        if receipt is None or type(receipt.get("version")) is not int or receipt["version"] != 1:
+            return None
+        checked_at, model, effort = _iso(receipt["checked_at"]), receipt["model"], receipt["effort"]
+        rows = receipt["slots"]
+        if (not checked_at or receipt["region"] != "SG" or not isinstance(model, str)
+                or model != configured_model or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,119}", model)
+                or not isinstance(rows, list) or not 1 <= len(rows) <= 17):
+            return None
+        validate_model_settings({"model": model, "reasoning_effort": effort}, "codex")
+        slots = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict) or type(row.get("slot")) is not int or row["slot"] != index:
+                return None
+            role, status, reason = row["role"], row["status"], row["reason"]
+            http_status, latency = row["http_status"], row["latency_ms"]
+            if (role not in ("primary", "backup") or role == "primary" and index != 1
+                    or status not in ("ready", "unavailable", "unknown") or reason not in _API_KEY_STATUS_REASONS
+                    or http_status is not None and (type(http_status) is not int or not 100 <= http_status <= 599)
+                    or type(latency) is not int or not 0 <= latency <= 180000):
+                return None
+            slots.append({"slot": index, "role": role, "status": status, "reason": reason,
+                          "http_status": http_status, "latency_ms": latency})
+        return {"version": 1, "checked_at": datetime.fromisoformat(checked_at).astimezone(timezone.utc).isoformat(),
+                "model": model, "effort": effort, "region": "SG", "slots": slots}
+    except (OSError, ValueError, RuntimeError, TypeError, OverflowError, KeyError, RecursionError):
+        return None
+
+
 def _review_request_label(row):
     status, code = row.get("http_status"), row.get("api_error_code")
     if row.get("api_error_parameter") == "reasoning.effort" and code in ("invalid_value", "unsupported_value", "unsupported_parameter"):
@@ -735,6 +772,7 @@ def _empty(now):
             "models": {role: {"name": name, "model": None, "effort": None} for role, name in (("codex", "Codex"), ("dsh", "DSH"))},
             "codex_auth": {"policy": None, "current": None, "fallback": False},
             "api_review": None,
+            "api_key_status": None,
             "review_route": None,
             "check_progress": {"total": 0, "current_id": None},
             "task": None, "checks": [], "accepted": [], "deferred": [], "activity": [], "burst": None, "provider_retry": None,
@@ -1730,6 +1768,7 @@ def collect_snapshot(config_path: Path) -> dict:
         }
         codex = config["codex"]
         model, effort = codex_role_settings(config, "review", now=now)
+        snapshot["api_key_status"] = _api_key_status(runtime, model)
         snapshot["models"]["codex"].update(model=_clean(model, 120) or "配置默认模型",
                                           effort=_clean(effort, 40) or "默认")
         policy = codex.get("auth_mode", "inherit")

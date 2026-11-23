@@ -373,10 +373,14 @@
     });
   }
   const viewLabels={overview:'工作台总览',development:'功能开发',art:'美术工作室',flows:'模块流程',history:'验收记录',settings:'运行设置'};
-  const legacyViews={'art-panel':'art','workflow-panel':'development','modules-panel':'development','task-panel':'development','checks-panel':'development','activity-panel':'development','accepted-panel':'history','deferred-panel':'history','system-settings':'settings'};
+  const legacyViews={'art-panel':'art','workflow-panel':'development','modules-panel':'development','task-panel':'development','checks-panel':'development','activity-panel':'development','accepted-panel':'history','deferred-panel':'history','system-settings':'settings','settings-key-health':'settings'};
   let activeView='',viewScroll=new Map();
   function routeView(){
     const hash=location.hash.slice(1),view=Object.hasOwn(viewLabels,hash)?hash:legacyViews[hash]||'overview';
+    if(hash==='settings-key-health'){
+      $('system-settings').open=true;
+      if(view===activeView)requestAnimationFrame(()=>$(hash).scrollIntoView({block:'start'}));
+    }
     if(view===activeView)return;
     if(activeView)viewScroll.set(activeView,window.scrollY);
     const initial=!activeView;activeView=view;
@@ -1087,7 +1091,43 @@
     filterHistory();
   }
 
+  const keyProbeStatuses={ready:'可用',unavailable:'不可用',unknown:'待确认'};
+  const keyProbeReasons={
+    completed:'测试请求成功',output_limit:'已接通，达到测试输出上限',invalid_key:'Key 无效或已撤销',
+    permission_denied:'缺少调用权限',quota_exhausted:'额度不足',rate_limited:'请求限流',
+    model_unavailable:'核验模型或思考档不可用',transport:'网络连接异常',
+    server_error:'服务端暂时异常',unexpected_error:'返回异常，结果待确认'
+  };
+  function renderKeyHealth(probe){
+    const slots=Array.isArray(probe?.slots)?probe.slots:[];
+    $('settings-key-empty').hidden=slots.length>0;
+    $('settings-key-meta').hidden=!slots.length;
+    $('settings-key-slots').hidden=!slots.length;
+    text('settings-key-meta',slots.length?[
+      '上次实测 '+dateTime(probe.checked_at,true)+'（北京时间）',
+      modelWithEffort(probe.model,probe.effort),probe.region==='SG'?'新加坡出口':''
+    ].filter(Boolean).join(' · '):'');
+    let backup=0;
+    const rows=slots.map(slot=>({
+      label:slot.role==='primary'?'主 Key':'备用 Key '+(++backup),
+      status:Object.hasOwn(keyProbeStatuses,slot.status)?slot.status:'unknown',
+      reason:Object.hasOwn(keyProbeReasons,slot.reason)?keyProbeReasons[slot.reason]:keyProbeReasons.unexpected_error,
+      response:[
+        Number.isInteger(slot.http_status)?'HTTP '+slot.http_status:'',
+        Number.isInteger(slot.latency_ms)?slot.latency_ms+' 毫秒':''
+      ].filter(Boolean).join(' · ')
+    }));
+    renderList('settings-key-slots',rows,row=>{
+      const item=node('li','settings-key-row');
+      item.dataset.status=row.status;
+      item.append(node('strong','',row.label),node('span','settings-key-result',keyProbeStatuses[row.status]),
+        node('span','settings-key-reason',row.reason),node('span','settings-key-response',row.response));
+      return item;
+    });
+  }
+
   function renderRuntimeSettings(snapshot,codingProvider,codingName,planningName,active){
+    renderKeyHealth(snapshot.api_key_status);
     const worker=snapshot.worker||{},sch=snapshot.schedule||{},status=snapshot.status||{};
     const auth=snapshot.codex_auth||{},models=snapshot.models||{},route=snapshot.review_route;
     const stages=Array.isArray(snapshot.workflow?.nodes)?snapshot.workflow.nodes:[];

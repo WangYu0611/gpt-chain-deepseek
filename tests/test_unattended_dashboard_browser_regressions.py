@@ -129,6 +129,42 @@ class DashboardBrowserRegressionTests(unittest.TestCase):
         expect(active).to_be_focused()
         self.cache.resolve_art.assert_not_called()
 
+    def test_settings_key_probe_shows_four_ordered_slots_and_beijing_time(self):
+        from playwright.sync_api import expect
+
+        self.open_view("settings")
+        expect(self.page.locator("#settings-key-empty")).to_be_visible()
+        self.value["api_key_status"] = {
+            "version": 1, "checked_at": "2026-11-23T06:23:00+00:00",
+            "model": "gpt-6.2-astra", "effort": "high", "region": "SG",
+            "slots": [
+                {"slot": 1, "role": "primary", "status": "ready", "reason": "completed", "http_status": 200, "latency_ms": 980},
+                {"slot": 2, "role": "backup", "status": "unavailable", "reason": "quota_exhausted", "http_status": 429, "latency_ms": 234},
+                {"slot": 3, "role": "backup", "status": "unknown", "reason": "transport", "http_status": None, "latency_ms": 1100},
+                {"slot": 4, "role": "backup", "status": "unavailable", "reason": "invalid_key", "http_status": 401, "latency_ms": 300},
+            ],
+        }
+        self.refresh()
+        self.page.set_viewport_size({"width": 390, "height": 844})
+        rows = self.page.locator("#settings-key-slots li")
+        expect(rows.locator("strong")).to_have_text(["主 Key", "备用 Key 1", "备用 Key 2", "备用 Key 3"])
+        expect(rows.locator(".settings-key-result")).to_have_text(["可用", "不可用", "待确认", "不可用"])
+        expect(rows.nth(1)).to_contain_text("额度不足")
+        expect(rows.nth(2)).to_contain_text("网络连接异常")
+        expect(rows.nth(3)).to_contain_text("HTTP 401")
+        meta = self.page.locator("#settings-key-meta")
+        for label in ("14:23:00", "北京时间", "GPT-6.2 Astra", "high", "新加坡出口"):
+            expect(meta).to_contain_text(label)
+        self.assertLessEqual(self.page.evaluate("document.documentElement.scrollWidth"), 390)
+
+        self.page.locator("#system-settings summary").click()
+        self.value["review_route"] = {"model": "gpt-6.2-astra", "effort": "high", "fallback_enabled": True}
+        self.open_view("development")
+        self.refresh()
+        self.page.get_by_role("link", name="查看 Key 实测").click()
+        expect(self.page.locator("#settings-key-health")).to_be_visible()
+        expect(self.page).to_have_url(re.compile(r"/#settings-key-health$"))
+
     def test_same_version_draft_focus_and_selection_survive_other_batch_refresh(self):
         from playwright.sync_api import expect
         feedback = self.card().locator(".art-feedback")

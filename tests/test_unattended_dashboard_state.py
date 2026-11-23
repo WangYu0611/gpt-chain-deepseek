@@ -68,6 +68,64 @@ class DashboardStateTests(unittest.TestCase):
         self.assertTrue(result["worker"]["healthy"])
         self.assertIsNone(result["error"])
 
+    def api_key_status_receipt(self):
+        return {"version": 1, "checked_at": "2026-11-02T19:05:00+08:00",
+                "model": self.config["codex"]["model"], "effort": "high", "region": "SG",
+                "slots": [
+                    {"slot": 1, "role": "primary", "status": "ready", "reason": "completed",
+                     "http_status": 200, "latency_ms": 250},
+                    {"slot": 2, "role": "backup", "status": "unavailable", "reason": "quota_exhausted",
+                     "http_status": 429, "latency_ms": 180},
+                    {"slot": 3, "role": "backup", "status": "unavailable", "reason": "invalid_key",
+                     "http_status": 401, "latency_ms": 210},
+                    {"slot": 4, "role": "backup", "status": "unknown", "reason": "transport",
+                     "http_status": None, "latency_ms": 15000},
+                ]}
+
+    def test_api_key_status_is_read_only_and_does_not_publish_raw_fields(self):
+        path = self.runtime / "api-key-status.json"
+        self.assertIsNone(self.snapshot()["api_key_status"])
+        receipt = self.api_key_status_receipt()
+        expected = {**self.api_key_status_receipt(), "checked_at": "2026-11-02T11:05:00+00:00"}
+        receipt["raw_response"] = "probe response must not appear on the dashboard"
+        receipt["slots"][0]["key"] = "synthetic-credential-must-not-appear"
+        self.write(path, receipt)
+        original = path.read_bytes(), path.stat().st_mtime_ns
+        self.assertEqual(self.snapshot()["api_key_status"], expected)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), original)
+
+    def test_invalid_api_key_status_receipt_does_not_break_the_dashboard(self):
+        path = self.runtime / "api-key-status.json"
+        for change in (
+                lambda receipt: receipt.update(checked_at="2026-11-02T11:05:00"),
+                lambda receipt: receipt.update(model="another-model"),
+                lambda receipt: receipt.update(effort="arbitrary native response"),
+                lambda receipt: receipt.update(region="other"),
+                lambda receipt: receipt["slots"][1].update(slot=1),
+                lambda receipt: receipt["slots"][1].update(role="primary"),
+                lambda receipt: receipt["slots"][1].update(reason="private upstream error details"),
+                lambda receipt: receipt["slots"][1].update(status="unexpected"),
+                lambda receipt: receipt["slots"][1].update(http_status=True),
+                lambda receipt: receipt["slots"][1].update(latency_ms=180001),
+                lambda receipt: receipt.update(raw_body=" " * 8192),
+        ):
+            with self.subTest(change=change):
+                receipt = self.api_key_status_receipt()
+                change(receipt)
+                self.write(path, receipt)
+                result = self.snapshot()
+                self.assertIsNone(result["api_key_status"])
+                self.assertIsNone(result["error"])
+                self.assertTrue(result["worker"]["healthy"])
+        path.write_text("{", encoding="utf-8")
+        self.assertIsNone(self.snapshot()["api_key_status"])
+        self.write(path, self.api_key_status_receipt())
+        linked = dashboard._linked
+        with patch.object(dashboard, "_linked", side_effect=lambda candidate: candidate == path or linked(candidate)):
+            result = self.snapshot()
+        self.assertIsNone(result["api_key_status"])
+        self.assertIsNone(result["error"])
+
     def test_codex_auth_requires_evidence_and_follows_live_subscription_transcript(self):
         self.config["codex"].update(auth_mode="api_key", subscription_fallback=True)
         self.write(self.config_path, self.config)

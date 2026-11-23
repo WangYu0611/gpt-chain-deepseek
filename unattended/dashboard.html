@@ -218,6 +218,7 @@
         <div class="review-route-meta">
           <span class="tag" id="dev-review-model" hidden></span>
           <span class="tag" id="dev-review-head" hidden></span>
+          <a href="#settings-key-health">查看 Key 实测</a>
         </div>
       </div>
       <div class="review-route-steps" id="dev-review-steps" aria-label="核验认证顺序">
@@ -392,6 +393,14 @@
           <div class="settings-auth">
             <div class="settings-auth-row"><h3>独立审核</h3><div class="settings-auth-value"><p id="settings-review-access">等待同步</p><div class="model-detail" id="codex-auth" hidden></div></div></div>
             <div class="settings-auth-row"><h3>开发</h3><p class="settings-auth-value" id="settings-coding-access">等待同步</p></div>
+          </div>
+        </section>
+        <section class="settings-section" id="settings-key-health" aria-labelledby="settings-key-heading">
+          <h2 id="settings-key-heading">核验 Key 实测</h2>
+          <div class="settings-key-health">
+            <p class="small" id="settings-key-meta" hidden></p>
+            <ul class="settings-key-list" id="settings-key-slots" aria-label="上次实测结果" hidden></ul>
+            <p class="small" id="settings-key-empty">尚无实测结果。</p>
           </div>
         </section>
         <section class="settings-section" aria-labelledby="settings-path-heading">
