@@ -186,6 +186,37 @@ class DevelopmentDashboardBrowserTests(unittest.TestCase):
         self.refresh()
         expect(self.page.locator("#module-checks")).to_be_visible()
 
+    def test_completed_planning_distinguishes_recorded_ultra_from_current_high(self):
+        from playwright.sync_api import expect
+
+        mode = {"model": "gpt-6.2-astra", "effort": "ultra", "model_source": "recorded",
+                "configured_model": "gpt-6.2-astra", "configured_effort": "high"}
+        self.value["task"]["planning"].update(mode)
+        planner = next(item for item in self.value["workflow"]["nodes"] if item["id"] == "routine_plan")
+        module = next(item for item in self.value["modules"] if item["id"] == "routine_planner")
+        planner.update(mode)
+        module.update(mode)
+        planning_card = {**planner, "actor": "Codex", "detail_url": "/api/flow/detail?lane=development&node=routine_plan"}
+        self.value["flows"] = {"development": {"nodes": [planning_card], "current": "check"}}
+        self.cache.flow_detail.return_value = {**planning_card, "lane": "development", "node": "routine_plan"}
+        self.refresh()
+
+        stage = self.page.locator('.dev-flow [data-node="routine_plan"]')
+        expect(stage.locator('[data-field="model"]')).to_have_text("当前配置 · GPT-6.2 Astra · high")
+        stage.click()
+        inspector = self.page.locator("#module-routine_planner")
+        expect(inspector.locator(".role-model")).to_have_text("当前配置 · GPT-6.2 Astra · high")
+        expect(inspector.locator(".role-recorded-model")).to_have_text("已完成调用 · GPT-6.2 Astra · ultra")
+        expect(self.page.locator("#task-planning-model")).to_have_text("当前配置 · GPT-6.2 Astra · high")
+        expect(self.page.locator("#task-planning-history")).to_have_text("已完成规划 · GPT-6.2 Astra · ultra")
+
+        self.page.locator('.links [data-open-view="flows"]').click()
+        flow = self.page.locator('#flow-lane-development [data-flow-node="routine_plan"]')
+        expect(flow.locator(".flows-node-model")).to_have_text("当前配置 · GPT-6.2 Astra · high")
+        flow.click()
+        expect(self.page.locator("#flow-detail-model")).to_have_text(
+            "已完成调用 · GPT-6.2 Astra · ultra / 当前配置 · GPT-6.2 Astra · high")
+
     def test_wait_pause_ready_stale_and_disconnection_do_not_claim_execution(self):
         from playwright.sync_api import expect
         for state, status in (("ready", "check"), ("waiting", "waiting_provider"), ("paused", "paused"), ("stale", "heartbeat_stale"), ("blocked", "blocked")):

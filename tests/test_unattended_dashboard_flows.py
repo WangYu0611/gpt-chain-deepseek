@@ -54,11 +54,14 @@ class DashboardFlowsTests(unittest.TestCase):
 
     def test_development_reuses_real_workflow_states_and_distinguishes_configured_review_model(self):
         cfg = json.loads(self.f.main_path.read_text(encoding="utf-8"))
-        cfg["codex"] = {"model": "gpt-6-astra", "reasoning_effort": "high"}
+        cfg["codex"] = {"model": "gpt-6-astra", "reasoning_effort": "ultra",
+                        "effort_change_at": "2000-01-01T00:00:00+08:00", "effort_after_change": "high"}
         write_json(self.f.main_path, cfg)
         self.snapshot["status"].update(phase="REVIEW", code="blocked", error="真正阻塞 token=secret-example")
         self.snapshot["workflow"] = {"current": "review", "summary": "审核暂停", "edges": [{"from": "check", "to": "review", "label": "检查完成"}],
             "nodes": [{"id": "code", "title": "开发", "state": "completed", "model": "claude-sonnet-5-5", "effort": "high", "model_source": "recorded"},
+                      {"id": "critical_plan", "title": "关键规划", "state": "completed", "model": "gpt-6-astra",
+                       "effort": "ultra", "model_source": "recorded", "configured_model": "gpt-6-astra", "configured_effort": "high"},
                       {"id": "review", "title": "审核", "state": "blocked", "summary": "审核暂停", "model": None, "model_source": "unknown"}]}
         rows = self.nodes(self.project(), "development")
         self.assertEqual(rows["code"]["state"], "completed")
@@ -66,6 +69,8 @@ class DashboardFlowsTests(unittest.TestCase):
         self.assertEqual(rows["review"]["state"], "blocked")
         self.assertEqual(rows["review"]["model"], "gpt-6-astra")
         self.assertEqual(rows["review"]["model_source"], "configured")
+        self.assertEqual((rows["review"]["effort"], rows["review"]["configured_effort"]), ("high", "high"))
+        self.assertEqual((rows["critical_plan"]["effort"], rows["critical_plan"]["configured_effort"]), ("ultra", "high"))
         self.assertIn("真正阻塞", rows["review"]["blocked_reason"])
         self.assertNotIn("secret-example", rows["review"]["blocked_reason"])
 

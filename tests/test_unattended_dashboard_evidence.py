@@ -64,6 +64,15 @@ class NodeEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "范围已变化"):
             self.evidence(ref)
 
+    def test_flow_detail_keeps_recorded_and_configured_model_effort_distinct(self):
+        node = {"id": "routine_plan", "state": "completed", "current": False, "model": "gpt-6.2-astra",
+                "effort": "ultra", "model_source": "recorded", "configured_model": "gpt-6.2-astra",
+                "configured_effort": "high"}
+        snapshot = {"flows": {"development": {"nodes": [node]}}}
+        detail = e.collect_node_detail(self.config_path, "development", node["id"], snapshot=snapshot)
+        for key in node.keys() - {"id"}:
+            self.assertEqual(detail[key], node[key])
+
     def test_unknown_node_and_arbitrary_ref_are_rejected(self):
         for lane, node in (("private", "code"), ("development", "../../config")):
             with self.assertRaises(ValueError): self.detail(lane, node)

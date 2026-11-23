@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import re
 
-from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_coding_settings, codex_role_settings, load_config
+from .config import ART_CODING_REASONING_EFFORT, claude_execution_model, codex_role_settings, load_config
 from .calendar import BEIJING
 from .dashboard_state import _CODING_NAMES, _clean, _confined, _iso, _object
 
@@ -62,8 +62,8 @@ def _development(snapshot, config):
     workflow, status = snapshot.get("workflow") or {}, snapshot.get("status") or {}
     current = workflow.get("current")
     current = current if current in NODE_IDS["development"] else None
-    roles = {"routine_plan": ("Claude Code" if config.get("planning_provider") == "claude" else "Codex"),
-             "critical_plan": "Claude Code", "code": _CODING_NAMES[config.get("coding_provider", "dsh")],
+    planner = "Claude Code" if config.get("planning_provider") == "claude" else "Codex"
+    roles = {"routine_plan": planner, "critical_plan": planner, "code": _CODING_NAMES[config.get("coding_provider", "dsh")],
              "check": "UE / 控制器", "review": "Codex", "milestone_review": "Codex",
              "publish": "控制器", "milestone_publish": "Git / 控制器"}
     nodes = []
@@ -78,17 +78,23 @@ def _development(snapshot, config):
         if active and waiting:
             reason = waiting
         model, effort, source = row.get("model"), row.get("effort"), row.get("model_source")
-        # Codex protocol receipts currently need not record the requested model.
-        # Today's configuration is a useful fallback, but is never actual evidence.
+        configured_model, configured_effort = row.get("configured_model"), row.get("configured_effort")
+        # An active call can lack model evidence. The effective settings remain
+        # available as configuration without overwriting a recorded call.
         if not model and active and identity in {"review", "milestone_review"}:
-            settings = config.get("codex", {})
-            model, effort, source = settings.get("model"), settings.get("reasoning_effort"), "configured"
+            if not configured_model:
+                configured_model, configured_effort = codex_role_settings(config, "review")
+            model, effort, source = configured_model, configured_effort, "configured"
         elif not model and active and identity == "code" and config.get("coding_provider") == "codex":
-            model, effort = codex_coding_settings(config)
-            source = "configured"
-        nodes.append(_node("development", identity, _clean(row.get("title"), 100), actor=roles[identity],
-                           state=row.get("state"), current=active, summary=summary, reason=reason,
-                           model=model, effort=effort, source=source))
+            if not configured_model:
+                configured_model, configured_effort = codex_role_settings(config, "code")
+            model, effort, source = configured_model, configured_effort, "configured"
+        node = _node("development", identity, _clean(row.get("title"), 100), actor=roles[identity],
+                     state=row.get("state"), current=active, summary=summary, reason=reason,
+                     model=model, effort=effort, source=source)
+        node.update(configured_model=_clean(configured_model, 120) or None,
+                    configured_effort=_clean(configured_effort, 40) or None)
+        nodes.append(node)
     edges = [{key: row.get(key) for key in ("from", "to", "label", "kind", "active")} for row in workflow.get("edges", [])
              if row.get("from") in NODE_IDS["development"] and row.get("to") in NODE_IDS["development"]]
     return _lane("development", "功能开发", current, nodes, edges, waiting or workflow.get("summary"))

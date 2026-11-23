@@ -890,7 +890,8 @@ def _collect(config_path, lane, node, snapshot=None):
     if snapshot:
         flow = snapshot.get("flows", {}).get(lane, {})
         projected = next((n for n in flow.get("nodes", []) if n.get("id") == node), {})
-        for key in ("summary", "model", "effort", "model_source", "blocked_reason"):
+        for key in ("summary", "state", "current", "model", "effort", "model_source",
+                    "configured_model", "configured_effort", "blocked_reason"):
             if key in projected:
                 detail[key] = projected[key]
     if lane == "operations":

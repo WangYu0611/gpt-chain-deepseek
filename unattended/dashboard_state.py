@@ -13,7 +13,7 @@ import stat
 from desktop_background import process_identity
 from .background import OWNER
 from .calendar import BEIJING, WorkCalendar
-from .config import (CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings, codex_coding_settings,
+from .config import (CLAUDE_API_MODEL, CLAUDE_PINNED_MODELS, claude_coding_settings,
                      codex_review_transport, codex_role_settings, load_config)
 from .providers import _CODEX_SUBSCRIPTION_DIR, _codex_api_quota_failed, claude_result_directory
 
@@ -755,13 +755,13 @@ def _planning_source(runtime, value):
         return None, {}
 
 
-def _coding_settings(config):
+def _coding_settings(config, *, now):
     provider = config.get("coding_provider", "dsh")
     if provider == "claude":
         return claude_coding_settings(config)
     settings = dict(config.get(provider, {}))
     if provider == "codex":
-        settings["model"], settings["reasoning_effort"] = codex_coding_settings(config)
+        settings["model"], settings["reasoning_effort"] = codex_role_settings(config, "code", now=now)
     return settings
 
 
@@ -1002,7 +1002,7 @@ def _replanning_model(runtime, operation, directory):
         return None, None
 
 
-def _workflow(snapshot, config, state, operation, directory=None):
+def _workflow(snapshot, config, state, operation, directory=None, *, now):
     """Build role and stage views from the same bounded checkpoint evidence."""
     status = snapshot["status"]
     phase = state.get("blocked_from") if state.get("phase") == "BLOCKED" else state.get("phase")
@@ -1012,12 +1012,12 @@ def _workflow(snapshot, config, state, operation, directory=None):
     if not isinstance(selection, dict) or not isinstance(milestone, dict):
         selection, milestone = {}, {}
     claude = config.get("claude", {})
-    review_model, review_effort = codex_role_settings(config, "review")
+    review_model, review_effort = codex_role_settings(config, "review", now=now)
     codex = {"model": review_model, "reasoning_effort": review_effort}
     planner = config.get("planning_provider", "codex")
     plan = config.get(planner, {})
     if planner == "codex":
-        plan_model, plan_effort = codex_role_settings(config, "plan")
+        plan_model, plan_effort = codex_role_settings(config, "plan", now=now)
         plan = {"model": plan_model, "reasoning_effort": plan_effort}
     coder = config.get("coding_provider", "dsh")
     replans = [row for row in task.get("replanning_history", []) if isinstance(row, dict) and row.get("task_id") == task.get("id")]
@@ -1057,12 +1057,17 @@ def _workflow(snapshot, config, state, operation, directory=None):
         ("routine_planner", "常规任务规划", "明确本轮任务范围、验收条件和核心测试，判断是否涉及关键系统。", plan),
         ("critical_planner", "关键系统规划", "核对关键系统边界、兼容性和跨模块行为，形成最终任务书。", plan if planner == "codex" else {"model": claude.get("critical_plan_model"), "reasoning_effort": claude.get("critical_plan_reasoning_effort", claude.get("reasoning_effort"))}),
         ("developer", "功能开发", "按任务书修改代码、运行提交前验证并提交本地变更。",
-         _coding_settings(config)),
+         _coding_settings(config, now=now)),
         ("checks", "构建与测试", "在固定提交上独立运行构建、核心测试及阶段检查。", {}),
         ("reviewer", "独立审核", "由 Codex 核对实际代码和证据，决定通过、返工或阻塞。", codex),
         ("publisher", "交付与发布", "登记通过的本地任务，阶段独立验收通过后按策略发布。", {}),
     ]
     role_map = {identity: settings for identity, _, _, settings in roles}
+    planning = (snapshot.get("task") or {}).get("planning")
+    if planning is not None:
+        settings = role_map["critical_planner" if planning["level"] == "critical" else "routine_planner"]
+        planning.update(configured_model=_clean(settings.get("model"), 120) or None,
+                        configured_effort=_clean(settings.get("reasoning_effort"), 40) or None)
     if task.get("kind") == "art" and task.get("coding_model") in CLAUDE_PINNED_MODELS:
         role_map["developer"] = {"model": task["coding_model"], "reasoning_effort": task.get("coding_reasoning_effort")}
     user_repair = (snapshot.get("task") or {}).get("user_repair")
@@ -1144,7 +1149,9 @@ def _workflow(snapshot, config, state, operation, directory=None):
         if identity == current:
             node_state = current_state
         settings = role_map[module_id]
-        model, effort = _clean(settings.get("model"), 120) or None, _clean(settings.get("reasoning_effort"), 40) or None
+        configured_model = _clean(settings.get("model"), 120) or None
+        configured_effort = _clean(settings.get("reasoning_effort"), 40) or None
+        model, effort = configured_model, configured_effort
         model_source = "configured" if model else "none"
         if identity == current and module_id not in {"checks", "publisher"} and owns_operation and (
                 operation.get("kind") == expected_kind or (phase == "PLAN" and selection.get("planning_model"))):
@@ -1189,7 +1196,8 @@ def _workflow(snapshot, config, state, operation, directory=None):
         nodes.append({"id": identity, "title": title, "module_id": module_id, "current": identity == current,
                       "optional": identity == "critical_plan", "enabled": enabled, "state": node_state,
                       "state_label": labels[node_state], "model": model, "effort": effort, "model_source": model_source,
-                      "configured_model": _clean(settings.get("model"), 120) or None, "summary": _clean(summary, 600)})
+                      "configured_model": configured_model, "configured_effort": configured_effort,
+                      "summary": _clean(summary, 600)})
     previous = {"critical_plan": "review" if phase == "REPLAN" else "routine_plan", "code": "critical_plan" if replans else "review" if rework_active else "critical_plan" if route == "critical" else "routine_plan",
                 "check": "critical_plan" if phase == "MILESTONE_REVIEW" and route == "critical" else "routine_plan" if phase == "MILESTONE_REVIEW" else "code",
                 "review": "check", "publish": "review", "milestone_review": "check", "milestone_publish": "milestone_review",
@@ -1212,7 +1220,8 @@ def _workflow(snapshot, config, state, operation, directory=None):
         summary = chosen["summary"]
         if identity == "developer" and rework_active:
             summary = "第 " + str(reworks) + " 次返工 · " + _clean(status["summary"], 400)
-        modules.append({key: chosen[key] for key in ("state", "state_label", "current", "model", "effort", "model_source", "configured_model")})
+        modules.append({key: chosen[key] for key in ("state", "state_label", "current", "model", "effort",
+                                                    "model_source", "configured_model", "configured_effort")})
         modules[-1].update(id=identity, title=title, responsibility=responsibility, summary=summary,
                            activity=activities, task_id=_clean(task.get("id"), 101) or None,
                            task_title=_clean(task.get("title"), 300) or None)
@@ -1744,7 +1753,7 @@ def collect_snapshot(config_path: Path) -> dict:
             snapshot["full_flow_error"] = "全流程测试记录暂时无法核实，请刷新后核对。"
         if state is None:
             snapshot["status"].update(code="not_initialized", label="尚未生成断点", summary="等待执行器创建运行状态。")
-            _workflow(snapshot, config, {}, {})
+            _workflow(snapshot, config, {}, {}, now=now)
             return snapshot
         phase = state.get("phase")
         if state.get("version") != 1 or phase not in _PHASES:
@@ -2050,7 +2059,7 @@ def collect_snapshot(config_path: Path) -> dict:
             if status["code"] == "code":
                 status["summary"] = ("上次调用超时，当前已继续；正在执行本轮开发与验证。" if "time limit" in previous_error.lower() or "超时" in previous_error else
                                      "上次调用的异常已保留，当前调用已继续执行。")
-        _workflow(snapshot, config, state, operation, directory)
+        _workflow(snapshot, config, state, operation, directory, now=now)
         return snapshot
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as error:
         message = "无法完整读取运行状态：" + _clean(str(error), 300)

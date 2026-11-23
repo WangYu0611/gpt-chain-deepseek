@@ -451,6 +451,7 @@
             <div class="task-meta"><span class="tag" id="reworks"></span><span class="tag hash" id="base-sha"></span><span class="tag hash" id="head-sha"></span></div>
             <div class="small" id="task-session">等待新会话建立</div>
             <div class="task-planning"><span class="tag" id="task-planning-level">规划分级待获取</span><span class="tag" id="task-planning-model">规划模型待获取</span></div>
+            <p class="small" id="task-planning-history" hidden></p>
             <div class="planning-reason" id="task-planning-reason"></div>
             <details class="details" id="task-details"><summary>任务说明</summary><div class="document" id="task-body"></div></details>
             <details class="details"><summary>验收条件</summary><ul class="criteria" id="criteria"></ul></details>
@@ -610,10 +611,23 @@
     const name=str(value);
     return {'claude-sonnet-5-5':'Sonnet 5.5','claude-opus-5-5':'Opus 5.5','claude-fable-5-2':'Fable 5.2','gpt-6-astra':'GPT-6 Astra','gpt-6.2-astra':'GPT-6.2 Astra','gpt-6.2-sol':'GPT-6.2 Sol'}[name]||name;
   }
+  function modelWithEffort(model,effort){
+    return model?[prettyModel(model),effort].filter(Boolean).join(' · '):'';
+  }
+  function configuredModelLabel(item){
+    const value=modelWithEffort(item.configured_model,item.configured_effort);
+    return value?'当前配置 · '+value:'';
+  }
+  function completedModelLabel(item){
+    const value=item.state==='completed'&&item.model_source==='recorded'?modelWithEffort(item.model,item.effort):'';
+    return value?'已完成调用 · '+value:'';
+  }
   function moduleModel(item){
-    if(item.model)return prettyModel(item.model)+(item.effort?' · '+str(item.effort):'')+(item.model_source==='configured'?' · 配置':'');
-    if(item.configured_model)return '配置 '+prettyModel(item.configured_model)+' · 执行模型未记录';
-    return item.id==='checks'?'UE / 自动化检查':item.id==='publisher'?'本地调度器':'执行模型未记录';
+    const configured=configuredModelLabel(item),completed=completedModelLabel(item);
+    if(completed)return configured||completed;
+    if(item.model)return modelWithEffort(item.model,item.effort)+(item.model_source==='configured'?' · 配置':'');
+    if(configured)return configured+'（执行模型未记录）';
+    return ['check','checks'].includes(item.id)?'UE / 自动化检查':['publish','publisher'].includes(item.id)?'本地调度器':'执行模型未记录';
   }
   function renderWorkflow(snapshot){
     const workflow=snapshot.workflow||{},nodes=Array.isArray(workflow.nodes)?workflow.nodes:[];
@@ -629,9 +643,9 @@
       el.dataset.state=item.state||'idle';
       const state=el.querySelector('[data-field="state"]');if(state)state.textContent=item.state_label||moduleStates[item.state]||'待同步';
       const model=el.querySelector('[data-field="model"]');
-      if(model)model.textContent=item.model?prettyModel(item.model)+(item.effort?' · '+item.effort:''):item.configured_model?prettyModel(item.configured_model):item.id==='check'?'UE / 自动化测试':item.id==='publish'?'本地调度器':'模型未记录';
+      if(model)model.textContent=moduleModel(item);
       const title=el.querySelector('.flow-title');if(title)title.textContent=item.title||title.textContent;
-      el.title=str(item.summary||item.title);
+      el.title=[item.summary||item.title,completedModelLabel(item)].filter(Boolean).join('\n');
       if(item.current)el.setAttribute('aria-current','step');else el.removeAttribute('aria-current');
     }
     for(const wire of document.querySelectorAll('.flow-wires path[data-from]')){
@@ -650,13 +664,15 @@
       const card=node('article','role-card'+(selectedModule===item.id?' selected':''));card.id='module-'+item.id;card.dataset.module=item.id;card.dataset.state=item.state||'idle';
       const top=node('div','role-top'),identity=node('div','role-identity');identity.append(node('span','role-icon',moduleIcons[item.id]),node('h3','',item.title));
       top.append(identity,node('span','module-status',item.state_label||moduleStates[item.state]||'待同步'));
-      const model=node('div','role-model',moduleModel(item));model.title=str(item.model||item.configured_model);
+      const model=node('div','role-model',moduleModel(item));
       const summary=node('div','role-summary');
       if(item.current&&item.task_title)summary.append(node('strong','role-task',str(item.task_title).replace(/^TASK-[A-Za-z0-9-]+[：:\s]*/,'')));
       summary.append(node('div','',item.summary||'等待执行记录。'));
       card.append(top,model,node('p','role-duty',item.responsibility),summary);
       const details=node('details','role-details');details.dataset.module=item.id;details.open=openModules.has(item.id)||selectedModule===item.id;
       details.append(node('summary','','查看模块记录'));
+      const completed=completedModelLabel(item);
+      if(completed&&item.configured_model)details.append(node('p','small role-recorded-model',completed));
       const activity=Array.isArray(item.activity)?item.activity:[];
       if(activity.length){const list=node('ul','role-events');list.append(...activity.map(event=>node('li','',event.text||'执行记录')));details.append(list);}
       else details.append(node('p','small',item.current?'当前尚无可展示的工具记录。':'执行到该模块时显示对应活动。'));
@@ -669,9 +685,12 @@
     text('metric-pending',snapshot.publication?.pending_tasks??'—');
     text('metric-reworks',snapshot.task?.reworks??'—');
     const planning=snapshot.task?.planning||{},task=snapshot.task||{};
-    const level=planning.level||task.planning_level,model=planning.model||task.planning_model;
+    const level=planning.level||task.planning_level;
+    const configured=configuredModelLabel(planning),recorded=modelWithEffort(planning.model||task.planning_model,planning.effort);
     text('task-planning-level',level==='critical'?'关键系统规划':level==='routine'?'日常任务规划':'规划分级未记录');
-    text('task-planning-model',model?prettyModel(model):'规划模型未记录');
+    text('task-planning-model',configured||(recorded?'已完成规划 · '+recorded:'规划模型未记录'));
+    const history=configured&&recorded&&recorded!==modelWithEffort(planning.configured_model,planning.configured_effort)?'已完成规划 · '+recorded:'';
+    $('task-planning-history').hidden=!history;text('task-planning-history',history);
     text('task-planning-reason',planning.reason||task.planning_reason||'');
   }
   function developmentState(snapshot){
@@ -876,15 +895,18 @@
 
   const flowLaneNames={development:'功能开发',art:'美术制作',operations:'后台服务'};
   let flowsFingerprint='';
-  function flowModelLabel(item){
+  function flowModelLabel(item,{evidence=false}={}){
+    const configured=configuredModelLabel(item),completed=completedModelLabel(item);
+    if(completed)return evidence?[completed,configured].filter(Boolean).join(' / '):configured||completed;
     if(!item.model){
+      if(configured)return configured+'（执行模型未记录）';
       const actor=str(item.actor);
       if(actor==='用户')return '人工视觉验收';
       if(/Tripo/i.test(actor))return '云端生成工具';
       if(/Blender|UE|Git|控制器|监督器|通知器|后台|飞书/i.test(actor))return '工具 / 服务执行';
       return '执行模型未记录';
     }
-    const value=prettyModel(item.model)+(item.effort?' · '+str(item.effort):'');
+    const value=modelWithEffort(item.model,item.effort);
     return item.model_source==='recorded'?'执行模型 · '+value:item.model_source==='configured'?'配置模型 · '+value+'（执行模型未记录）':'模型来源未记录 · '+value;
   }
   function renderFlows(snapshot){
@@ -971,7 +993,7 @@
       const response=await fetch(selection.url,{cache:'no-store',signal:controller.signal,headers:{Accept:'application/json'}});if(!response.ok)throw new Error('HTTP '+response.status);const detail=await response.json();
       if(!isCurrent())return;if(!detail||detail.lane!==selection.lane||detail.node!==selection.node)throw new Error('详情与当前步骤不匹配');
       text('flow-detail-title',detail.title||selection.title);text('flow-detail-scope',[detail.scope_label,detail.task_id&&!str(detail.scope_label).includes(detail.task_id)?'任务 '+detail.task_id:''].filter(Boolean).join(' · ')||'该步骤的本轮记录');
-      text('flow-detail-summary',detail.summary||'暂无本轮步骤记录。');text('flow-detail-model',flowModelLabel({...detail,actor:detail.actor||selection.actor}));text('flow-detail-blocked','阻塞 / 等待原因：'+str(detail.blocked_reason));$('flow-detail-blocked').hidden=!detail.blocked_reason;
+      text('flow-detail-summary',detail.summary||'暂无本轮步骤记录。');text('flow-detail-model',flowModelLabel({...detail,actor:detail.actor||selection.actor},{evidence:true}));text('flow-detail-blocked','阻塞 / 等待原因：'+str(detail.blocked_reason));$('flow-detail-blocked').hidden=!detail.blocked_reason;
       text('flow-detail-status',(connected?'详情已同步 ':'状态连接中断 · 数据过期；详情读取于 ')+dateTime(Date.now())+' · 每 3 秒刷新');
       if(detail.artifact_notice)text('flow-detail-status',$('flow-detail-status').textContent+' · '+str(detail.artifact_notice));
       if(selection.lane==='art'&&selection.node==='review'&&detail.rework_history){acceptArtReworkDetail(detail);text('flow-detail-status',(connected?'详情已同步 ':'状态连接中断 · 数据过期；详情读取于 ')+dateTime(Date.now())+' · 返工历史每 15 秒刷新');}
@@ -985,7 +1007,7 @@
     const selection={lane,node:id,title:item.title,actor:item.actor},url=flowURL(item.detail_url,'detail',selection);if(!url){toast('当前步骤详情链接不可用。');return;}selection.url=url;
     flowDialog.token++;flowDialog.detailController?.abort();flowDialog.evidenceController?.abort();flowDialog.detailSequence++;flowDialog.evidenceSequence++;flowDialog.detailController=null;flowDialog.evidenceController=null;clearInterval(flowDialog.timer);
     flowDialog.selection=selection;flowDialog.trigger=button;flowDialog.evidence=null;flowDialog.items=[];flowDialog.menuFingerprint='';
-    text('flow-detail-title',item.title||id);text('flow-detail-scope',flowLaneNames[lane]+' · 本轮步骤');text('flow-detail-summary',item.summary);text('flow-detail-model',flowModelLabel(item));text('flow-detail-blocked','阻塞 / 等待原因：'+str(item.blocked_reason));$('flow-detail-blocked').hidden=!item.blocked_reason;
+    text('flow-detail-title',item.title||id);text('flow-detail-scope',flowLaneNames[lane]+' · 本轮步骤');text('flow-detail-summary',item.summary);text('flow-detail-model',flowModelLabel(item,{evidence:true}));text('flow-detail-blocked','阻塞 / 等待原因：'+str(item.blocked_reason));$('flow-detail-blocked').hidden=!item.blocked_reason;
     text('flow-detail-status','正在读取详情…');$('flow-detail-logs').replaceChildren();$('flow-detail-artifacts').replaceChildren();text('flow-evidence-title','选择日志或产物');resetFlowEvidence();
     $('flow-detail-reworks').hidden=!(lane==='art'&&id==='review');
     if(!$('flow-detail-dialog').open)$('flow-detail-dialog').showModal();loadFlowDetail();flowDialog.timer=setInterval(loadFlowDetail,lane==='art'&&id==='review'?15000:3000);

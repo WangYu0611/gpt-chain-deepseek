@@ -81,6 +81,30 @@ class DashboardWorkflowTests(unittest.TestCase):
         self.assertTrue(modules["developer"]["current"])
         self.assertEqual(snapshot["task"]["planning"]["level"], "routine")
 
+    def test_completed_codex_planning_keeps_recorded_effort_separate_from_current_settings(self):
+        self.config.update(planning_provider="codex", coding_provider="codex", codex_only=True)
+        self.config["codex"].update(model="gpt-6.2-astra", plan_model="gpt-6.2-astra",
+                                    reasoning_effort="ultra", effort_change_at="2026-11-02T11:00:00+00:00",
+                                    effort_after_change="high", coding_model="gpt-6.2-sol")
+        self.save_config()
+        task = self.task("critical")
+        source = self.fixture.runtime / "runs" / "codex-draft"
+        self.fixture.write(source / "planning-decision.json", {
+            "planning_model": "gpt-6.2-astra", "planning_reasoning_effort": "ultra",
+        })
+        task.update(coding_provider="codex", planning_model="gpt-6.2-astra",
+                    planning_reasoning_effort="ultra", planning_source_output_dir=str(source))
+        self.state["phase"] = "CODE"
+        snapshot = self.fixture.snapshot()
+        nodes, modules = self.nodes(snapshot), self.modules(snapshot)
+        for row in (nodes["routine_plan"], nodes["critical_plan"], modules["routine_planner"],
+                    modules["critical_planner"]):
+            self.assertEqual((row["state"], row["model_source"], row["effort"]), ("completed", "recorded", "ultra"))
+            self.assertEqual((row["configured_model"], row["configured_effort"]), ("gpt-6.2-astra", "high"))
+        planning = snapshot["task"]["planning"]
+        self.assertEqual((planning["model"], planning["effort"]), ("gpt-6.2-astra", "ultra"))
+        self.assertEqual((planning["configured_model"], planning["configured_effort"]), ("gpt-6.2-astra", "high"))
+
     def test_rework_highlights_the_review_to_development_loop(self):
         task = self.task()
         task.update(reworks=2, feedback="Correct the failed behavior and rerun its check.")
